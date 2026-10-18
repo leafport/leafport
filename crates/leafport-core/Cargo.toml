@@ -1,0 +1,8 @@
+[package]
+name = "leafport-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+roxmltree.workspace = true
+reqwest.workspace = true

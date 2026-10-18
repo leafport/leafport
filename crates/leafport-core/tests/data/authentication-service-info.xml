@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture; not a server capture. -->
+<authenticationServiceInfo xmlns="http://ns.adobe.com/adept">
+  <signInMethods>
+    <signInMethod method="anonymous">Anonymous</signInMethod>
+    <signInMethod method="AdobeID">Adobe ID from server</signInMethod>
+    <signInMethod method="VendorID" nodeId="urn:uuid:test-one">Bibliothèque &amp; Books</signInMethod>
+    <signInMethod method="VendorID" nodeId="urn:uuid:test-two">Bücher</signInMethod>
+  </signInMethods>
+</authenticationServiceInfo>
