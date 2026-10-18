@@ -3,10 +3,19 @@ name = "leafport-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["keyring"]
+keyring = ["dep:keyring"]
+
 [dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 roxmltree.workspace = true
 reqwest.workspace = true
 sha1 = "0.10.6"
 rsa = "0.9.8"
 rand = "0.8.5"
 base64 = "0.22.1"
+zeroize = "1.8"
+x509-cert = "0.2.5"
+aes = "0.8.4"
+cbc = { version = "0.1.2", features = ["alloc"] }
