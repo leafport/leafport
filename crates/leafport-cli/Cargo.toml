@@ -1,0 +1,11 @@
+[package]
+name = "leafport-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "leafport"
+path = "src/main.rs"
+
+[dependencies]
+leafport-core = { path = "../leafport-core" }

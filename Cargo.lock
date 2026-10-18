@@ -1062,6 +1062,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "leafport-cli"
+version = "0.1.0-dev"
+dependencies = [
+ "leafport-core",
+]
+
+[[package]]
 name = "leafport-core"
 version = "0.1.0-dev"
 dependencies = [

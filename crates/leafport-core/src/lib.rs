@@ -4,6 +4,7 @@ pub use rsa;
 
 pub mod activation;
 pub mod cloud;
+pub mod fulfillment;
 pub mod infoset;
 pub mod service;
 pub mod signing;
