@@ -1,0 +1,95 @@
+mod common;
+
+use leafport_core::cloud::{
+    CloudClient, CloudError, CloudResponseError, acknowledge_upload, download_records,
+    download_request, upload_request,
+};
+use leafport_core::signing::RequestSigningError;
+
+#[test]
+fn download_request_omits_missing_and_empty_dates() {
+    let request = download_request("u&1", Some(""), Some("2026-01-01"), common::key()).unwrap();
+    assert!(request.starts_with(
+        r#"<synctodevice xmlns="http://ns.adobe.com/adept"><user>u&amp;1</user><toDate>2026-01-01</toDate><signature"#
+    ));
+    common::verify_signed(&request, common::key());
+}
+
+#[test]
+fn upload_request_base64_encodes_acsm_and_bounds_size() {
+    let request = upload_request("u", b"<acsm/>", common::key()).unwrap();
+    assert!(request.contains("<acsm>PGFjc20vPg==</acsm>"));
+    common::verify_signed(&request, common::key());
+    assert!(matches!(
+        upload_request("u", &vec![0; 3 * 1024 * 1024 + 1], common::key()),
+        Err(RequestSigningError::TooLarge)
+    ));
+}
+
+#[test]
+fn download_records_decode_and_skip_incomplete_entries() {
+    let xml = r#"<synctodeviceResult xmlns="http://ns.adobe.com/adept">
+        <user2acsm><user>a</user><acsm>PGFj
+            c20vPg==</acsm><extra/></user2acsm>
+        <user2acsm><user>b</user></user2acsm>
+        <other><user2acsm><user>c</user><acsm>eA==</acsm></user2acsm></other>
+    </synctodeviceResult>"#;
+    let records = download_records(xml).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].user, "a");
+    assert_eq!(records[0].acsm, b"<acsm/>");
+}
+
+#[test]
+fn download_records_report_service_errors_and_bad_base64() {
+    assert!(download_records("<empty/>").unwrap().is_empty());
+    assert!(matches!(
+        download_records(r#"<error xmlns="http://ns.adobe.com/adept"/>"#),
+        Err(CloudResponseError::Service { .. })
+    ));
+    assert!(matches!(
+        download_records(
+            r#"<synctodeviceResult xmlns="http://ns.adobe.com/adept"><user2acsm><user>a</user><acsm>!</acsm></user2acsm></synctodeviceResult>"#
+        ),
+        Err(CloudResponseError::InvalidAcsm(_))
+    ));
+}
+
+#[test]
+fn upload_acknowledgment_requires_explicit_success() {
+    acknowledge_upload(
+        r#"<synctocloudResult xmlns="http://ns.adobe.com/adept">SUCCESS</synctocloudResult>"#,
+    )
+    .unwrap();
+    for xml in [
+        r#"<synctocloudResult xmlns="http://ns.adobe.com/adept">FAILURE</synctocloudResult>"#,
+        r#"<synctocloudResult>SUCCESS</synctocloudResult>"#,
+        r#"<ok xmlns="http://ns.adobe.com/adept">SUCCESS</ok>"#,
+    ] {
+        assert!(matches!(
+            acknowledge_upload(xml),
+            Err(CloudResponseError::InvalidResponse)
+        ));
+    }
+    assert!(matches!(
+        acknowledge_upload(r#"<error xmlns="http://ns.adobe.com/adept"/>"#),
+        Err(CloudResponseError::Service { .. })
+    ));
+}
+
+#[test]
+fn cloud_client_accepts_only_plain_http_bases() {
+    assert!(CloudClient::new(leafport_core::cloud::PRODUCTION_BASE).is_ok());
+    for base in [
+        "ftp://h/x",
+        "https://user:pw@h/x",
+        "https://h/x?q=1",
+        "https://h/x#f",
+        "not a url",
+    ] {
+        assert!(
+            matches!(CloudClient::new(base), Err(CloudError::Endpoint)),
+            "{base}"
+        );
+    }
+}
