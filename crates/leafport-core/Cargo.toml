@@ -19,3 +19,5 @@ zeroize = "1.8"
 x509-cert = "0.2.5"
 aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc"] }
+flate2 = "1.0.35"
+lopdf = "0.42"
