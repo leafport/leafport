@@ -2,6 +2,7 @@
 
 pub use rsa;
 
+pub mod cloud;
 pub mod infoset;
 pub mod service;
 pub mod signing;
