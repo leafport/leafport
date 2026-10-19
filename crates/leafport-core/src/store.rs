@@ -130,9 +130,9 @@ impl ActivationState {
         let mut device_key = [0u8; 16];
         device_key.copy_from_slice(&blob[1..17]);
         let mut cursor = &blob[17..];
-        let authentication = RsaPrivateKey::from_pkcs8_der(take_field(&mut cursor)?)
+        let mut authentication = RsaPrivateKey::from_pkcs8_der(take_field(&mut cursor)?)
             .map_err(|error| StoreError::Key(error.to_string()))?;
-        let license = RsaPrivateKey::from_pkcs8_der(take_field(&mut cursor)?)
+        let mut license = RsaPrivateKey::from_pkcs8_der(take_field(&mut cursor)?)
             .map_err(|error| StoreError::Key(error.to_string()))?;
         let user = String::from_utf8(take_field(&mut cursor)?.to_vec())
             .map_err(|_| StoreError::Corrupt("user is not UTF-8"))?;
@@ -150,6 +150,16 @@ impl ActivationState {
         };
         let credentials_xml = String::from_utf8(take_field(&mut cursor)?.to_vec())
             .map_err(|_| StoreError::Corrupt("credentials are not UTF-8"))?;
+        // States saved before the account key was adopted hold the locally generated
+        // key; the service's account license key in the credentials takes precedence.
+        if let Some(account) = crate::activation::account_license_key(&credentials_xml, &device_key)
+        {
+            license = account;
+        }
+        // Likewise for the account signing key held in the credentials' pkcs12.
+        if let Some(account) = crate::activation::account_auth_key(&credentials_xml, &device_key) {
+            authentication = account;
+        }
         Ok(Self {
             device_key,
             keys: ActivationKeys {

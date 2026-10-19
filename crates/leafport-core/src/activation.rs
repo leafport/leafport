@@ -19,6 +19,112 @@ pub fn wrap_private_key(device_key: &[u8; 16], exported_key: &[u8]) -> Vec<u8> {
     wrapped
 }
 
+/// Inverse of [`wrap_private_key`]: strip the IV prefix and AES-128-CBC/PKCS#7 decrypt.
+pub fn unwrap_private_key(device_key: &[u8; 16], wrapped: &[u8]) -> Option<Vec<u8>> {
+    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    if wrapped.len() < 32 {
+        return None;
+    }
+    let (iv, ciphertext) = wrapped.split_at(16);
+    cbc::Decryptor::<aes::Aes128>::new(device_key.into(), iv.into())
+        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .ok()
+}
+
+/// The account's license key from a SignInDirect response. An existing Adobe ID keeps
+/// its license key across devices: the service returns it as `encryptedPrivateLicenseKey`
+/// wrapped with this device key, and licenses are encrypted to it rather than to the
+/// locally generated key. Requests are signed with [`account_auth_key`] instead.
+/// None when the response carries no usable key.
+pub fn account_license_key(credentials_xml: &str, device_key: &[u8; 16]) -> Option<RsaPrivateKey> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use zeroize::Zeroize;
+    let document = roxmltree::Document::parse_with_options(
+        credentials_xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 50_000,
+            entity_resolver: None,
+        },
+    )
+    .ok()?;
+    let encoded: String = document
+        .descendants()
+        .find(|node| node.has_tag_name((ADEPT_NS, "encryptedPrivateLicenseKey")))?
+        .text()?
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let wrapped = STANDARD.decode(encoded).ok()?;
+    let mut der = unwrap_private_key(device_key, &wrapped)?;
+    let key = RsaPrivateKey::from_pkcs8_der(&der)
+        .or_else(|_| RsaPrivateKey::from_pkcs1_der(&der))
+        .ok();
+    der.zeroize();
+    key
+}
+
+/// The account's signing key from a SignInDirect response. ADEPT request signatures
+/// are verified against the key in the returned `pkcs12`, whose password is the
+/// Base64 device key (libgourou `signNode`); the license key is rejected with
+/// E_ADEPT_INVALID_SIGNATURE (BadPadding). None when no usable key is present.
+pub fn account_auth_key(credentials_xml: &str, device_key: &[u8; 16]) -> Option<RsaPrivateKey> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use zeroize::Zeroize;
+    let document = roxmltree::Document::parse_with_options(
+        credentials_xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 50_000,
+            entity_resolver: None,
+        },
+    )
+    .ok()?;
+    let encoded: String = document
+        .descendants()
+        .find(|node| node.has_tag_name((ADEPT_NS, "pkcs12")))?
+        .text()?
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let pfx = p12::PFX::parse(&STANDARD.decode(encoded).ok()?).ok()?;
+    // PKCS#12 passwords are BMPStrings: UTF-16BE with a terminating NUL.
+    let mut password: Vec<u8> = STANDARD
+        .encode(device_key)
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    // Adobe's container is BER, and its RC2-40 certificate bag is not needed, so walk
+    // the safe contents leniently instead of using `PFX::key_bags`, which rejects it.
+    let mut keys = Vec::new();
+    if let Some(safe) = pfx.auth_safe.data(&password) {
+        let contents =
+            yasna::parse_ber(&safe, |r| r.collect_sequence_of(p12::ContentInfo::parse))
+                .unwrap_or_default();
+        for content in &contents {
+            let Some(data) = content.data(&password) else {
+                continue;
+            };
+            let bags = yasna::parse_ber(&data, |r| r.collect_sequence_of(p12::SafeBag::parse))
+                .unwrap_or_default();
+            keys.extend(bags.iter().filter_map(|bag| bag.bag.get_key(&password)));
+        }
+    }
+    password.zeroize();
+    let key = keys.iter().find_map(|der| {
+        RsaPrivateKey::from_pkcs8_der(der)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_der(der))
+            .ok()
+    });
+    keys.iter_mut().for_each(|der| der.zeroize());
+    key
+}
+
 pub struct ActivationKeys {
     pub authentication: RsaPrivateKey,
     pub license: RsaPrivateKey,

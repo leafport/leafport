@@ -156,3 +156,23 @@ fn sign_in_response_errors() {
         Err(SignInResponseError::Xml(_))
     ));
 }
+
+#[test]
+fn account_auth_key_reads_pkcs12_with_base64_device_key() {
+    use leafport_core::activation::account_auth_key;
+    use leafport_core::rsa::pkcs8::EncodePrivateKey;
+    let key = common::key();
+    let der = key.to_pkcs8_der().unwrap();
+    let pfx = p12::PFX::new(b"cert", der.as_bytes(), None, &STANDARD.encode(DEVICE_KEY), "auth")
+        .unwrap()
+        .to_der();
+    let xml = format!(
+        r#"<credentials xmlns="http://ns.adobe.com/adept"><user>urn:uuid:me</user><pkcs12>{}</pkcs12></credentials>"#,
+        STANDARD.encode(pfx)
+    );
+    assert_eq!(account_auth_key(&xml, &DEVICE_KEY).as_ref(), Some(key));
+    let mut other = DEVICE_KEY;
+    other[0] ^= 1;
+    assert!(account_auth_key(&xml, &other).is_none());
+    assert!(account_auth_key("<credentials xmlns=\"http://ns.adobe.com/adept\"/>", &DEVICE_KEY).is_none());
+}

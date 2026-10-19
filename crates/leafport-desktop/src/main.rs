@@ -438,6 +438,19 @@ impl Desktop {
                     &keys,
                 )
                 .map_err(|e| e.to_string())?;
+                // Adopt the account's license and signing keys when the service returns
+                // them; the generated keys only apply to a brand-new account.
+                let mut keys = keys;
+                if let Some(license) =
+                    activation::account_license_key(&signed.credentials_xml, &device_key)
+                {
+                    keys.license = license;
+                }
+                if let Some(authentication) =
+                    activation::account_auth_key(&signed.credentials_xml, &device_key)
+                {
+                    keys.authentication = authentication;
+                }
                 let state = ActivationState {
                     device,
                     fingerprint,
@@ -484,9 +497,9 @@ impl Desktop {
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "not signed in".to_string())?;
                 let client = CloudClient::new(cloud::PRODUCTION_BASE).map_err(|e| e.to_string())?;
-                // ADEPT requests are signed with the device's private license key.
+                // ADEPT requests are signed with the account key from the credentials pkcs12.
                 let records = client
-                    .download(&state.user, None, None, &state.keys.license)
+                    .download(&state.user, None, None, &state.keys.authentication)
                     .map_err(|e| e.to_string())?;
                 Ok(records.len())
             });
@@ -511,7 +524,7 @@ impl Desktop {
                 let bytes = std::fs::read(&acsm_path).map_err(|e| e.to_string())?;
                 let client = CloudClient::new(cloud::PRODUCTION_BASE).map_err(|e| e.to_string())?;
                 client
-                    .upload(&state.user, &bytes, &state.keys.license)
+                    .upload(&state.user, &bytes, &state.keys.authentication)
                     .map_err(|e| e.to_string())
             });
             let _ = tx.send(Event::Upload(result));
@@ -572,7 +585,7 @@ impl Desktop {
                     &state.device,
                     "standalone",
                     std::slice::from_ref(&descriptor),
-                    &state.keys.license,
+                    &state.keys.authentication,
                 )
                 .map_err(|e| e.to_string())?;
                 // Name the file by resource id when present, else by ACSM stem.
@@ -665,7 +678,7 @@ impl Desktop {
                     &state.user,
                     &state.device,
                     &info.loan_token_xml,
-                    &state.keys.license,
+                    &state.keys.authentication,
                 )
                 .map_err(|e| e.to_string())?;
                 // The loan is returned; remove the local copy and its sidecars.

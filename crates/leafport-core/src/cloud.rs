@@ -133,7 +133,16 @@ impl fmt::Display for CloudResponseError {
         match self {
             Self::TooLarge => write!(f, "cloud response exceeds the local size limit"),
             Self::Xml(error) => write!(f, "E_ADEPT_XML_SYNTAX: {error}"),
-            Self::Service { .. } => write!(f, "cloud service returned an ADEPT error"),
+            Self::Service { xml } => {
+                // The ADEPT error root carries its code and context in the `data` attribute.
+                let data = roxmltree::Document::parse(xml).ok().and_then(|document| {
+                    document.root_element().attribute("data").map(str::to_owned)
+                });
+                match data {
+                    Some(data) => write!(f, "cloud service returned an ADEPT error: {data}"),
+                    None => write!(f, "cloud service returned an ADEPT error"),
+                }
+            }
             Self::InvalidResponse => write!(f, "E_ADEPT_INVALID_RESPONSE SyncToCloud"),
         }
     }
