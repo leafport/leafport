@@ -1,6 +1,9 @@
 mod common;
 
-use leafport_core::drm::{DrmError, content_key, decrypt_resource, encrypted_resources};
+use leafport_core::drm::{
+    DrmError, MAX_RESOURCE_BYTES, content_key, decrypt_resource, encrypted_resources,
+    is_adept_encryption,
+};
 use leafport_core::rsa::Pkcs1v15Encrypt;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -89,10 +92,75 @@ fn encryption_manifest_lists_resources_and_compression() {
 }
 
 #[test]
-fn uncompressed_resource_decrypts_without_stripping_padding() {
+fn encryption_manifest_skips_non_adept_algorithms() {
+    let xml = r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
+            xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+        <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/ch1.xhtml"/></enc:CipherData>
+        </enc:EncryptedData>
+        <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/font.otf"/></enc:CipherData>
+        </enc:EncryptedData>
+    </encryption>"#;
+    let resources = encrypted_resources(xml).unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].uri, "OEBPS/ch1.xhtml");
+    assert!(is_adept_encryption(xml));
+}
+
+#[test]
+fn adept_detection_ignores_font_obfuscation_only_manifests() {
+    let font_only = r#"<encryption xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+        <enc:EncryptedData>
+            <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/font.otf"/></enc:CipherData>
+        </enc:EncryptedData>
+    </encryption>"#;
+    assert!(!is_adept_encryption(font_only));
+    assert!(encrypted_resources(font_only).unwrap().is_empty());
+    let default_method = r#"<encryption xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
+        <enc:EncryptedData>
+            <enc:CipherData><enc:CipherReference URI="OEBPS/ch1.xhtml"/></enc:CipherData>
+        </enc:EncryptedData>
+    </encryption>"#;
+    assert!(is_adept_encryption(default_method));
+    assert!(!is_adept_encryption("<encryption/>"));
+    assert!(!is_adept_encryption("not xml"));
+}
+
+#[test]
+fn uncompressed_aligned_resource_without_padding_is_unchanged() {
     let plain = b"exactly sixteen!exactly sixteen!";
     let data = common::aes_encrypt(&KEY, &IV, plain, false);
     assert_eq!(decrypt_resource(&data, &KEY, false).unwrap(), plain);
+}
+
+#[test]
+fn uncompressed_resource_has_pkcs7_padding_stripped() {
+    let plain = b"<html><body/></html>";
+    let data = common::aes_encrypt(&KEY, &IV, plain, true);
+    assert_eq!(decrypt_resource(&data, &KEY, false).unwrap(), plain);
+    let aligned = b"exactly sixteen!";
+    let data = common::aes_encrypt(&KEY, &IV, aligned, true);
+    assert_eq!(decrypt_resource(&data, &KEY, false).unwrap(), aligned);
+}
+
+#[test]
+fn compressed_resource_over_the_cap_is_rejected() {
+    use std::io::Write;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+    let chunk = vec![0u8; 1024 * 1024];
+    for _ in 0..(MAX_RESOURCE_BYTES / chunk.len() + 1) {
+        deflate.write_all(&chunk).unwrap();
+    }
+    let compressed = deflate.finish().unwrap();
+    let data = common::aes_encrypt(&KEY, &IV, &compressed, true);
+    assert!(matches!(
+        decrypt_resource(&data, &KEY, true),
+        Err(DrmError::TooLarge)
+    ));
 }
 
 #[test]

@@ -12,6 +12,24 @@ use std::{
 };
 use zip::ZipArchive;
 
+/// Maximum bytes read from one ZIP entry; declared sizes are not trusted.
+const ENTRY_LIMIT: usize = 64 * 1024 * 1024;
+/// Caps for `extract_to_dir`.
+const EXTRACT_TOTAL_LIMIT: usize = 512 * 1024 * 1024;
+const EXTRACT_ENTRY_LIMIT: usize = 10_000;
+
+/// Read at most `ENTRY_LIMIT` bytes from `f`, erroring when the stream is larger.
+fn read_limited(f: impl Read, name: &str) -> Result<Vec<u8>, String> {
+    let mut raw = Vec::new();
+    f.take(ENTRY_LIMIT as u64 + 1)
+        .read_to_end(&mut raw)
+        .map_err(|e| format!("{name}: {e}"))?;
+    if raw.len() > ENTRY_LIMIT {
+        return Err(format!("{name}: entry exceeds 64 MiB"));
+    }
+    Ok(raw)
+}
+
 /// Decryption context for one protected book: the unwrapped content key and the set of
 /// encrypted archive paths with their compression flag.
 struct Drm {
@@ -24,15 +42,10 @@ struct Drm {
 fn read_doc(zip: &mut ZipArchive<File>, name: &str, drm: Option<&Drm>) -> Result<String, String> {
     if let Some(drm) = drm {
         if let Some(&compressed) = drm.resources.get(name) {
-            let mut raw = Vec::new();
-            {
-                let mut f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
-                if f.size() > 64 * 1024 * 1024 {
-                    return Err(format!("{name}: encrypted entry exceeds 64 MiB"));
-                }
-                f.read_to_end(&mut raw)
-                    .map_err(|e| format!("{name}: {e}"))?;
-            }
+            let raw = {
+                let f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+                read_limited(f, name)?
+            };
             let plain = drm::decrypt_resource(&raw, &drm.key, compressed)
                 .map_err(|e| format!("{name}: {e}"))?;
             return String::from_utf8(plain)
@@ -71,15 +84,10 @@ fn read_bytes_entry(
     name: &str,
     drm: Option<&Drm>,
 ) -> Result<Vec<u8>, String> {
-    let mut raw = Vec::new();
-    {
-        let mut f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
-        if f.size() > 64 * 1024 * 1024 {
-            return Err(format!("{name}: entry exceeds 64 MiB"));
-        }
-        f.read_to_end(&mut raw)
-            .map_err(|e| format!("{name}: {e}"))?;
-    }
+    let raw = {
+        let f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+        read_limited(f, name)?
+    };
     if let Some(drm) = drm {
         if let Some(&compressed) = drm.resources.get(name) {
             return drm::decrypt_resource(&raw, &drm.key, compressed)
@@ -147,16 +155,8 @@ fn text(node: Node<'_, '_>) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn content(node: Node<'_, '_>, out: &mut String) {
-    if node.is_text() {
-        out.push_str(node.text().unwrap_or(""));
-        return;
-    }
-    if matches!(node.tag_name().name(), "script" | "style" | "head") {
-        return;
-    }
-    let name = node.tag_name().name();
-    let block = matches!(
+fn is_block(name: &str) -> bool {
+    matches!(
         name,
         "p" | "div"
             | "h1"
@@ -172,21 +172,96 @@ fn content(node: Node<'_, '_>, out: &mut String) {
             | "blockquote"
             | "figure"
             | "figcaption"
-    );
-    if block {
-        out.push('\n');
+    )
+}
+/// Iterative walk (explicit stack) so deeply nested documents cannot overflow the stack.
+fn content(root: Node<'_, '_>, out: &mut String) {
+    enum Step<'a, 'b> {
+        Visit(Node<'a, 'b>),
+        Close,
     }
-    // Mark list items with a bullet so lists stay legible in the reflowed text view.
-    if name == "li" {
-        out.push_str("• ");
-    }
-    for child in node.children() {
-        content(child, out);
-    }
-    if block {
-        out.push('\n');
+    let mut stack = vec![Step::Visit(root)];
+    while let Some(step) = stack.pop() {
+        let node = match step {
+            Step::Close => {
+                out.push('\n');
+                continue;
+            }
+            Step::Visit(node) => node,
+        };
+        if node.is_text() {
+            out.push_str(node.text().unwrap_or(""));
+            continue;
+        }
+        let name = node.tag_name().name();
+        if matches!(name, "script" | "style" | "head") {
+            continue;
+        }
+        let block = is_block(name);
+        if block {
+            out.push('\n');
+            stack.push(Step::Close);
+        }
+        // Mark list items with a bullet so lists stay legible in the reflowed text view.
+        if name == "li" {
+            out.push_str("• ");
+        }
+        let children: Vec<_> = node.children().collect();
+        stack.extend(children.into_iter().rev().map(Step::Visit));
     }
 }
+/// Detect ADEPT protection and, when the device license key is available, unwrap the
+/// content key and build the encrypted-resource map so protected books can be read.
+/// A book counts as protected only when encryption.xml declares ADEPT content;
+/// rights.xml alone and font obfuscation are not DRM. Returns the decryption context and,
+/// when the book cannot be read with the current account, the reason it is blocked.
+fn load_drm(
+    zip: &mut ZipArchive<File>,
+    license_key: Option<&RsaPrivateKey>,
+) -> Result<(Option<Drm>, Option<String>), String> {
+    let has_rights = zip.by_name("META-INF/rights.xml").is_ok();
+    let encryption = if zip.by_name("META-INF/encryption.xml").is_ok() {
+        Some(entry(zip, "META-INF/encryption.xml")?)
+    } else {
+        None
+    };
+    let adept_encryption = encryption.as_deref().is_some_and(drm::is_adept_encryption);
+    if !adept_encryption {
+        return Ok((None, None));
+    }
+    match (license_key, encryption) {
+        (Some(key), Some(encryption)) if has_rights => {
+            let rights = entry(zip, "META-INF/rights.xml")?;
+            match drm::content_key(&rights, key) {
+                Ok(content_key) => {
+                    let mut resources = HashMap::new();
+                    for resource in
+                        drm::encrypted_resources(&encryption).map_err(|e| e.to_string())?
+                    {
+                        // Match CipherReference URIs to resolved archive paths.
+                        let decoded = percent_encoding::percent_decode_str(&resource.uri)
+                            .decode_utf8()
+                            .map(|s| s.into_owned())
+                            .unwrap_or(resource.uri);
+                        resources.insert(decoded, resource.compressed);
+                    }
+                    Ok((
+                        Some(Drm {
+                            key: content_key,
+                            resources,
+                        }),
+                        None,
+                    ))
+                }
+                Err(error) => Ok((None, Some(format!(
+                    "This EPUB is protected and its content key could not be unwrapped with the current account ({error}). The original file is unchanged."
+                )))),
+            }
+        }
+        _ => Ok((None, Some("This EPUB declares protected resources. Sign in with the account it was fulfilled to in order to read it. The original file is unchanged.".into()))),
+    }
+}
+
 pub fn open(path: &Path, license_key: Option<&RsaPrivateKey>) -> Result<Book, String> {
     let mut zip =
         ZipArchive::new(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -220,47 +295,10 @@ pub fn open(path: &Path, license_key: Option<&RsaPrivateKey>) -> Result<Book, St
             .to_string_lossy()
             .into_owned();
     }
-    // Detect ADEPT protection and, when the device license key is available, unwrap the
-    // content key and build the encrypted-resource map so protected books can be read.
-    let has_rights = zip.by_name("META-INF/rights.xml").is_ok();
-    let has_encryption = zip.by_name("META-INF/encryption.xml").is_ok();
-    let mut drm: Option<Drm> = None;
-    if has_rights || has_encryption {
-        match license_key {
-            Some(key) if has_rights && has_encryption => {
-                let rights = entry(&mut zip, "META-INF/rights.xml")?;
-                let encryption = entry(&mut zip, "META-INF/encryption.xml")?;
-                match drm::content_key(&rights, key) {
-                    Ok(content_key) => {
-                        let mut resources = HashMap::new();
-                        for resource in
-                            drm::encrypted_resources(&encryption).map_err(|e| e.to_string())?
-                        {
-                            // Match CipherReference URIs to resolved archive paths.
-                            let decoded = percent_encoding::percent_decode_str(&resource.uri)
-                                .decode_utf8()
-                                .map(|s| s.into_owned())
-                                .unwrap_or(resource.uri);
-                            resources.insert(decoded, resource.compressed);
-                        }
-                        drm = Some(Drm {
-                            key: content_key,
-                            resources,
-                        });
-                    }
-                    Err(error) => {
-                        book.blocked = Some(format!(
-                            "This EPUB is protected and its content key could not be unwrapped with the current account ({error}). The original file is unchanged."
-                        ));
-                        return Ok(book);
-                    }
-                }
-            }
-            _ => {
-                book.blocked = Some("This EPUB declares protected resources. Sign in with the account it was fulfilled to in order to read it. The original file is unchanged.".into());
-                return Ok(book);
-            }
-        }
+    let (drm, blocked) = load_drm(&mut zip, license_key)?;
+    if blocked.is_some() {
+        book.blocked = blocked;
+        return Ok(book);
     }
     let manifest: HashMap<_, _> = doc
         .descendants()
@@ -275,14 +313,18 @@ pub fn open(path: &Path, license_key: Option<&RsaPrivateKey>) -> Result<Book, St
             .any(|p| p == "nav")
             || n.attribute("media-type") == Some("application/x-dtbncx+xml")
     }) {
-        let nav_path = resolve(opf_path, item.attribute("href").unwrap_or(""))?;
-        let nav = read_doc(&mut zip, &nav_path, drm.as_ref())?;
-        let nav_doc = xml(&nav)?;
+        let Ok(nav_path) = resolve(opf_path, item.attribute("href").unwrap_or("")) else {
+            continue;
+        };
+        let Ok(nav) = read_doc(&mut zip, &nav_path, drm.as_ref()) else {
+            continue;
+        };
+        let Ok(nav_doc) = xml(&nav) else {
+            continue;
+        };
         for link in nav_doc.descendants().filter(|n| n.has_tag_name("a")) {
-            if let Some(href) = link.attribute("href") {
-                titles
-                    .entry(resolve(&nav_path, href)?)
-                    .or_insert_with(|| text(link));
+            if let Some(Ok(href)) = link.attribute("href").map(|href| resolve(&nav_path, href)) {
+                titles.entry(href).or_insert_with(|| text(link));
             }
         }
         for point in nav_doc.descendants().filter(|n| n.has_tag_name("navPoint")) {
@@ -292,9 +334,9 @@ pub fn open(path: &Path, license_key: Option<&RsaPrivateKey>) -> Result<Book, St
                 .and_then(|n| n.attribute("src"));
             let label = point.children().find(|n| n.has_tag_name("navLabel"));
             if let (Some(href), Some(label)) = (href, label) {
-                titles
-                    .entry(resolve(&nav_path, href)?)
-                    .or_insert_with(|| text(label));
+                if let Ok(href) = resolve(&nav_path, href) {
+                    titles.entry(href).or_insert_with(|| text(label));
+                }
             }
         }
     }
@@ -400,45 +442,34 @@ pub fn extract_to_dir(
 ) -> Result<(), String> {
     let mut zip =
         ZipArchive::new(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    // Rebuild the decryption map, mirroring open().
-    let has_rights = zip.by_name("META-INF/rights.xml").is_ok();
-    let has_encryption = zip.by_name("META-INF/encryption.xml").is_ok();
-    let mut drm: Option<Drm> = None;
-    if has_rights || has_encryption {
-        match license_key {
-            Some(key) if has_rights && has_encryption => {
-                let rights = entry(&mut zip, "META-INF/rights.xml")?;
-                let encryption = entry(&mut zip, "META-INF/encryption.xml")?;
-                let content_key = drm::content_key(&rights, key).map_err(|e| e.to_string())?;
-                let mut resources = HashMap::new();
-                for resource in drm::encrypted_resources(&encryption).map_err(|e| e.to_string())? {
-                    let decoded = percent_encoding::percent_decode_str(&resource.uri)
-                        .decode_utf8()
-                        .map(|s| s.into_owned())
-                        .unwrap_or(resource.uri);
-                    resources.insert(decoded, resource.compressed);
-                }
-                drm = Some(Drm {
-                    key: content_key,
-                    resources,
-                });
-            }
-            _ => return Err("protected EPUB requires the fulfilling account".into()),
-        }
+    let (drm, blocked) = load_drm(&mut zip, license_key)?;
+    if let Some(reason) = blocked {
+        return Err(reason);
     }
-    let names: Vec<String> = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_owned()))
+    // Keep each entry's archive name for lookup and its enclosed path for the destination;
+    // entries that would escape the output directory have no enclosed path and are skipped.
+    let names: Vec<(String, PathBuf)> = (0..zip.len())
+        .filter_map(|i| {
+            let f = zip.by_index(i).ok()?;
+            Some((f.name().to_owned(), f.enclosed_name()?))
+        })
         .collect();
-    for name in names {
+    let mut total = 0usize;
+    let mut count = 0usize;
+    for (name, enclosed) in names {
         if name.ends_with('/') {
             continue;
         }
-        // Reject entries that would escape the output directory.
-        if name.contains("..") || name.starts_with('/') || name.contains('\\') {
-            continue;
+        count += 1;
+        if count > EXTRACT_ENTRY_LIMIT {
+            return Err("EPUB has too many entries to extract".into());
         }
         let bytes = read_bytes_entry(&mut zip, &name, drm.as_ref())?;
-        let dest = out_dir.join(&name);
+        total = total.saturating_add(bytes.len());
+        if total > EXTRACT_TOTAL_LIMIT {
+            return Err("EPUB extracted size exceeds 512 MiB limit".into());
+        }
+        let dest = out_dir.join(enclosed);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }

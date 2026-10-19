@@ -12,6 +12,10 @@ use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 
 const ADEPT: &str = "http://ns.adobe.com/adept";
 const XMLENC: &str = "http://www.w3.org/2001/04/xmlenc#";
+const AES128_CBC: &str = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
+
+/// Upper bound on an inflated resource, guarding against deflate bombs.
+pub const MAX_RESOURCE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum DrmError {
@@ -30,6 +34,8 @@ pub enum DrmError {
     Misaligned,
     /// Raw-inflate of the decrypted stream failed.
     Inflate(std::io::Error),
+    /// The inflated resource exceeded MAX_RESOURCE_BYTES.
+    TooLarge,
 }
 
 impl fmt::Display for DrmError {
@@ -45,6 +51,7 @@ impl fmt::Display for DrmError {
             Self::Truncated => write!(f, "encrypted resource is too short to contain an IV"),
             Self::Misaligned => write!(f, "encrypted resource is not block-aligned"),
             Self::Inflate(error) => write!(f, "decrypted stream did not inflate: {error}"),
+            Self::TooLarge => write!(f, "inflated resource exceeds {MAX_RESOURCE_BYTES} bytes"),
         }
     }
 }
@@ -91,10 +98,8 @@ pub struct EncryptedResource {
     pub compressed: bool,
 }
 
-/// Parse encryption.xml into the set of encrypted resources. URIs are percent-decoded
-/// by the caller against the archive; they are returned here as written.
-pub fn encrypted_resources(encryption_xml: &str) -> Result<Vec<EncryptedResource>, DrmError> {
-    let document = roxmltree::Document::parse_with_options(
+fn parse_encryption(encryption_xml: &str) -> Result<roxmltree::Document<'_>, DrmError> {
+    roxmltree::Document::parse_with_options(
         encryption_xml,
         roxmltree::ParsingOptions {
             allow_dtd: false,
@@ -102,11 +107,37 @@ pub fn encrypted_resources(encryption_xml: &str) -> Result<Vec<EncryptedResource
             entity_resolver: None,
         },
     )
-    .map_err(DrmError::Xml)?;
+    .map_err(DrmError::Xml)
+}
+
+/// Whether an EncryptedData entry is ADEPT AES-128-CBC. A missing EncryptionMethod is
+/// the ADEPT default; other algorithms (IDPF font obfuscation, Adobe PDF RC) are not.
+fn is_adept_data(data: roxmltree::Node<'_, '_>) -> bool {
+    data.children()
+        .find(|node| node.has_tag_name((XMLENC, "EncryptionMethod")))
+        .is_none_or(|method| method.attribute("Algorithm") == Some(AES128_CBC))
+}
+
+/// Whether encryption.xml lists any ADEPT-encrypted resource, i.e. the book is
+/// DRM-protected. Unparseable XML is treated as not ADEPT.
+pub fn is_adept_encryption(encryption_xml: &str) -> bool {
+    parse_encryption(encryption_xml).is_ok_and(|document| {
+        document
+            .descendants()
+            .filter(|node| node.has_tag_name((XMLENC, "EncryptedData")))
+            .any(is_adept_data)
+    })
+}
+
+/// Parse encryption.xml into the set of ADEPT-encrypted resources. URIs are
+/// percent-decoded by the caller against the archive; they are returned here as written.
+pub fn encrypted_resources(encryption_xml: &str) -> Result<Vec<EncryptedResource>, DrmError> {
+    let document = parse_encryption(encryption_xml)?;
     let mut resources = Vec::new();
     for data in document
         .descendants()
         .filter(|node| node.has_tag_name((XMLENC, "EncryptedData")))
+        .filter(|node| is_adept_data(*node))
     {
         let Some(uri) = data
             .descendants()
@@ -131,9 +162,9 @@ pub fn encrypted_resources(encryption_xml: &str) -> Result<Vec<EncryptedResource
 
 /// Decrypt one encrypted resource. ADEPT prepends a 16-byte IV to the AES-128-CBC
 /// ciphertext; when the resource was compressed, the plaintext is raw-deflate and is
-/// inflated here. Block padding is not stripped explicitly: the inflate stream
-/// self-terminates, and an uncompressed resource keeps any trailing padding, which the
-/// XHTML parser tolerates.
+/// inflated here, capped at MAX_RESOURCE_BYTES. A compressed stream self-terminates, so
+/// its padding is ignored; an uncompressed resource has valid PKCS#7 padding stripped
+/// (trailing pad bytes would break XML parsing) and is otherwise returned as-is.
 pub fn decrypt_resource(
     data: &[u8],
     key: &[u8; 16],
@@ -152,12 +183,27 @@ pub fn decrypt_resource(
         .decrypt_padded_mut::<NoPadding>(&mut buffer)
         .map_err(|_| DrmError::Misaligned)?;
     if !compressed {
-        return Ok(plain.to_vec());
+        let pad = usize::from(*plain.last().unwrap_or(&0));
+        let padded = (1..=16).contains(&pad)
+            && pad <= plain.len()
+            && plain[plain.len() - pad..]
+                .iter()
+                .all(|&b| usize::from(b) == pad);
+        let end = if padded {
+            plain.len() - pad
+        } else {
+            plain.len()
+        };
+        return Ok(plain[..end].to_vec());
     }
     use std::io::Read;
     let mut output = Vec::with_capacity(plain.len() * 3);
     flate2::read::DeflateDecoder::new(plain)
+        .take(MAX_RESOURCE_BYTES as u64 + 1)
         .read_to_end(&mut output)
         .map_err(DrmError::Inflate)?;
+    if output.len() > MAX_RESOURCE_BYTES {
+        return Err(DrmError::TooLarge);
+    }
     Ok(output)
 }
