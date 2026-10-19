@@ -102,6 +102,21 @@ impl ServiceClient {
             .connect_timeout(Duration::from_secs(15))
             // Fulfilled downloads can be large; allow a longer overall deadline.
             .timeout(Duration::from_secs(300))
+            // ADEPT relies on signatures, so http is allowed; cap redirect chains
+            // and refuse https -> http downgrades and non-http(s) schemes.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() > 5 {
+                    attempt.error("too many redirects")
+                } else if !matches!(attempt.url().scheme(), "http" | "https") {
+                    attempt.error("redirect to non-http(s) scheme")
+                } else if attempt.url().scheme() == "http"
+                    && attempt.previous().last().is_some_and(|p| p.scheme() == "https")
+                {
+                    attempt.error("https to http redirect downgrade")
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(ServiceError::Http)?;
         Ok(Self { http })
