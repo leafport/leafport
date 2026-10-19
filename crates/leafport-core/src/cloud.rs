@@ -126,7 +126,6 @@ pub enum CloudResponseError {
         xml: String,
     },
     InvalidResponse,
-    InvalidAcsm(base64::DecodeError),
 }
 
 impl fmt::Display for CloudResponseError {
@@ -136,7 +135,6 @@ impl fmt::Display for CloudResponseError {
             Self::Xml(error) => write!(f, "E_ADEPT_XML_SYNTAX: {error}"),
             Self::Service { .. } => write!(f, "cloud service returned an ADEPT error"),
             Self::InvalidResponse => write!(f, "E_ADEPT_INVALID_RESPONSE SyncToCloud"),
-            Self::InvalidAcsm(error) => write!(f, "invalid cloud ACSM encoding: {error}"),
         }
     }
 }
@@ -150,7 +148,8 @@ pub struct DownloadRecord {
 }
 
 /// Decode returned records without committing library changes or advancing dates.
-/// Entries missing either user or acsm are skipped; unknown children are ignored.
+/// Entries missing either user or acsm, or whose acsm is not valid Base64, are
+/// skipped; unknown children are ignored.
 pub fn download_records(xml: &str) -> Result<Vec<DownloadRecord>, CloudResponseError> {
     const NS: &str = "http://ns.adobe.com/adept";
     if xml.len() > 4 * 1024 * 1024 {
@@ -195,9 +194,9 @@ pub fn download_records(xml: &str) -> Result<Vec<DownloadRecord>, CloudResponseE
                     .chars()
                     .filter(|c| !c.is_ascii_whitespace())
                     .collect();
-                let acsm = STANDARD
-                    .decode(encoded)
-                    .map_err(CloudResponseError::InvalidAcsm)?;
+                let Ok(acsm) = STANDARD.decode(encoded) else {
+                    continue;
+                };
                 records.push(DownloadRecord { user, acsm });
             }
         }
@@ -231,7 +230,7 @@ pub fn acknowledge_upload(xml: &str) -> Result<(), CloudResponseError> {
         .filter(|node| node.is_text())
         .filter_map(|node| node.text())
         .collect();
-    if root.has_tag_name(("http://ns.adobe.com/adept", "synctocloudResult")) && text == "SUCCESS" {
+    if root.has_tag_name(("http://ns.adobe.com/adept", "synctocloudResult")) && text.trim() == "SUCCESS" {
         Ok(())
     } else {
         Err(CloudResponseError::InvalidResponse)

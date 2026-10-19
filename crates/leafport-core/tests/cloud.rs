@@ -41,24 +41,29 @@ fn download_records_decode_and_skip_incomplete_entries() {
 }
 
 #[test]
-fn download_records_report_service_errors_and_bad_base64() {
+fn download_records_report_service_errors_and_skip_bad_base64() {
     assert!(download_records("<empty/>").unwrap().is_empty());
     assert!(matches!(
         download_records(r#"<error xmlns="http://ns.adobe.com/adept"/>"#),
         Err(CloudResponseError::Service { .. })
     ));
-    assert!(matches!(
-        download_records(
-            r#"<synctodeviceResult xmlns="http://ns.adobe.com/adept"><user2acsm><user>a</user><acsm>!</acsm></user2acsm></synctodeviceResult>"#
-        ),
-        Err(CloudResponseError::InvalidAcsm(_))
-    ));
+    let records = download_records(
+        r#"<synctodeviceResult xmlns="http://ns.adobe.com/adept"><user2acsm><user>a</user><acsm>!</acsm></user2acsm><user2acsm><user>b</user><acsm>eA==</acsm></user2acsm></synctodeviceResult>"#,
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].user, "b");
+    assert_eq!(records[0].acsm, b"x");
 }
 
 #[test]
 fn upload_acknowledgment_requires_explicit_success() {
     acknowledge_upload(
         r#"<synctocloudResult xmlns="http://ns.adobe.com/adept">SUCCESS</synctocloudResult>"#,
+    )
+    .unwrap();
+    acknowledge_upload(
+        "<synctocloudResult xmlns=\"http://ns.adobe.com/adept\">\n  SUCCESS\n</synctocloudResult>",
     )
     .unwrap();
     for xml in [
