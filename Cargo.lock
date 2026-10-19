@@ -2670,10 +2670,12 @@ dependencies = [
  "cbc",
  "flate2",
  "humantime",
+ "image",
  "keyring",
  "lopdf",
  "md-5",
  "p12",
+ "pdfium-render",
  "percent-encoding",
  "rand 0.8.8",
  "rc4",
@@ -2686,6 +2688,7 @@ dependencies = [
  "x509-cert",
  "yasna",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
