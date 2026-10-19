@@ -1,90 +1,17 @@
 mod common;
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
+use common::{ADEPT_DATA, CHAPTER, CONTAINER, KEY, adept_epub, epub, protected_epub};
 use leafport_core::library::{
     Format, LibraryError, decrypt_publication, epub_loan_token, extract_cover, pdfium_available,
 };
-use leafport_core::rsa::Pkcs1v15Encrypt;
-use zip::write::SimpleFileOptions;
 
-const KEY: [u8; 16] = *b"0123456789abcdef";
-const IV: [u8; 16] = [7; 16];
-const CHAPTER: &[u8] = b"<html><body><p>Chapter one</p></body></html>";
 const FONT: &[u8] = b"obfuscated font bytes";
-const ADEPT_DATA: &str = r#"<enc:EncryptedData>
-        <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
-        <enc:CipherData><enc:CipherReference URI="OEBPS/ch%31.xhtml"/></enc:CipherData>
-    </enc:EncryptedData>"#;
 const FONT_DATA: &str = r#"<enc:EncryptedData>
         <enc:EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>
         <enc:CipherData><enc:CipherReference URI="OEBPS/font.otf"/></enc:CipherData>
     </enc:EncryptedData>"#;
-const CONTAINER: &[u8] = br#"<?xml version="1.0"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
-</container>"#;
-
-/// Zip builder: entries in order, `mimetype` stored, everything else deflated.
-fn epub(entries: &[(&str, &[u8])]) -> Vec<u8> {
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, bytes) in entries {
-        let method = if *name == "mimetype" {
-            zip::CompressionMethod::Stored
-        } else {
-            zip::CompressionMethod::Deflated
-        };
-        zip.start_file(
-            *name,
-            SimpleFileOptions::default().compression_method(method),
-        )
-        .unwrap();
-        zip.write_all(bytes).unwrap();
-    }
-    zip.finish().unwrap().into_inner()
-}
-
-fn encryption_xml(data: &[&str]) -> String {
-    format!(
-        r#"<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"
-    xmlns:enc="http://www.w3.org/2001/04/xmlenc#">
-    {}
-</encryption>"#,
-        data.join("\n    ")
-    )
-}
-
-fn rights() -> String {
-    let wrapped = common::key()
-        .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &KEY)
-        .unwrap();
-    format!(
-        r#"<rights xmlns="http://ns.adobe.com/adept"><licenseToken><encryptedKey keyInfo="x">{}</encryptedKey></licenseToken></rights>"#,
-        STANDARD.encode(wrapped)
-    )
-}
-
-fn protected_epub(key: [u8; 16], extra: &[(&str, &[u8])], data: &[&str]) -> Vec<u8> {
-    let chapter = common::aes_encrypt(&key, &IV, CHAPTER, true);
-    let encryption = encryption_xml(data);
-    let rights = rights();
-    let mut entries: Vec<(&str, &[u8])> = vec![
-        ("mimetype", b"application/epub+zip"),
-        ("META-INF/container.xml", CONTAINER),
-        ("META-INF/rights.xml", rights.as_bytes()),
-        ("META-INF/encryption.xml", encryption.as_bytes()),
-        ("OEBPS/ch1.xhtml", &chapter),
-    ];
-    entries.extend_from_slice(extra);
-    epub(&entries)
-}
-
-/// One chapter encrypted with `key` (wrapped to `common::key()` in rights.xml).
-fn adept_epub(key: [u8; 16]) -> Vec<u8> {
-    protected_epub(key, &[], &[ADEPT_DATA])
-}
 
 fn read(zip: &mut zip::ZipArchive<Cursor<&Vec<u8>>>, name: &str) -> Vec<u8> {
     let mut out = Vec::new();

@@ -7,6 +7,7 @@ pub mod paths;
 pub mod publication;
 pub mod scan;
 pub mod settings;
+pub mod sync;
 
 use std::fmt;
 
@@ -21,6 +22,7 @@ pub use publication::{
 };
 pub use scan::{Item, ItemState, Library, LocalItem, merge};
 pub use settings::{Settings, Theme};
+pub use sync::{SyncOutcome, load_cache, refresh, return_loan, target_descriptor};
 
 #[derive(Debug)]
 pub enum LibraryError {
