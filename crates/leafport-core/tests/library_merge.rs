@@ -280,3 +280,47 @@ fn rescan_keeps_tmp_entries_and_lists_items() {
     assert!(root.join(".tmp-x").is_dir());
     assert_eq!(lib.local.len(), 1);
 }
+
+const SET_ASIDE: &str = ".old-0123456789abcdef-White Sand";
+
+fn set_aside_folder(root: &Path) -> PathBuf {
+    let old = root.join(SET_ASIDE);
+    std::fs::create_dir_all(&old).unwrap();
+    metadata("urn:uuid:a", "White Sand").write(&old).unwrap();
+    old
+}
+
+#[test]
+fn open_restores_set_aside_folder_when_original_is_missing() {
+    let root = tempdir();
+    let old = set_aside_folder(root.path());
+    let lib = Library::open(root.path()).unwrap();
+    let folder = root.path().join("White Sand");
+    assert!(!old.exists());
+    assert_eq!(Metadata::read(&folder).unwrap().resource, "urn:uuid:a");
+    assert_eq!(lib.local.len(), 1);
+    assert_eq!(lib.local[0].folder, folder);
+}
+
+#[test]
+fn open_removes_set_aside_folder_when_original_exists() {
+    let root = tempdir();
+    let old = set_aside_folder(root.path());
+    let folder = root.path().join("White Sand");
+    std::fs::create_dir_all(&folder).unwrap();
+    metadata("urn:uuid:b", "White Sand").write(&folder).unwrap();
+    let lib = Library::open(root.path()).unwrap();
+    assert!(!old.exists());
+    assert_eq!(Metadata::read(&folder).unwrap().resource, "urn:uuid:b");
+    assert_eq!(lib.local.len(), 1);
+}
+
+#[test]
+fn rescan_leaves_set_aside_folder_in_place() {
+    let root = tempdir();
+    let old = set_aside_folder(root.path());
+    let lib = Library::rescan(root.path()).unwrap();
+    assert!(old.join("metadata.yaml").is_file());
+    assert!(!root.path().join("White Sand").exists());
+    assert!(lib.local.is_empty());
+}

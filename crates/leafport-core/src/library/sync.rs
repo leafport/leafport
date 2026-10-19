@@ -210,13 +210,27 @@ fn replace_folder(root: &Path, temp: &Path, folder: &Path) -> Result<(), Library
         std::fs::rename(temp, folder)?;
         return Ok(());
     }
-    let old = root.join(format!("{}-old", temp_name()));
+    let name = folder
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Not a `.tmp-` name: `Library::open` restores this folder instead of sweeping it.
+    let old = root.join(format!(".old-{:016x}-{name}", rand::random::<u64>()));
     std::fs::rename(folder, &old)?;
     if let Err(e) = std::fs::rename(temp, folder) {
-        let _ = std::fs::rename(&old, folder);
+        if let Err(restore) = std::fs::rename(&old, folder) {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; restoring failed ({restore}), previous copy kept at {}",
+                    old.display()
+                ),
+            )
+            .into());
+        }
         return Err(e.into());
     }
-    // Best effort: a leftover `.tmp-*` folder is swept on the next open.
+    // Best effort: a leftover `.old-` folder is removed on the next open.
     let _ = std::fs::remove_dir_all(&old);
     Ok(())
 }

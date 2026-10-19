@@ -39,12 +39,11 @@ fn tempdir() -> TempDir {
     TempDir(dir)
 }
 
+/// No `.tmp-` temp or `.old-` set-aside entry remains in `root`.
 fn no_tmp_left(root: &Path) -> bool {
     std::fs::read_dir(root).unwrap().all(|e| {
-        !e.unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".tmp-")
+        let name = e.unwrap().file_name().to_string_lossy().into_owned();
+        !name.starts_with(".tmp-") && !name.starts_with(".old-")
     })
 }
 

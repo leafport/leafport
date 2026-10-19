@@ -37,12 +37,29 @@ impl Library {
 
     fn scan(root: &Path, sweep: bool) -> Result<Library, LibraryError> {
         let mut local = Vec::new();
-        for entry in std::fs::read_dir(root)? {
-            let entry = entry?;
+        // Snapshot the entries so a folder restored below is not listed twice.
+        let entries = std::fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
+        for entry in entries {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let path = entry.path();
-            if name.starts_with(".tmp-") {
+            let mut path = entry.path();
+            let mut hidden = name.starts_with('.');
+            if let Some(original) = set_aside_name(&name) {
+                // A previous copy set aside by a sync: restore it unless its folder exists.
+                if !sweep {
+                    continue;
+                }
+                let target = root.join(original);
+                if target.exists() {
+                    let _ = std::fs::remove_dir_all(&path);
+                    continue;
+                }
+                if std::fs::rename(&path, &target).is_err() {
+                    continue;
+                }
+                path = target;
+                hidden = false;
+            } else if name.starts_with(".tmp-") {
                 // Best effort: a stale temp that cannot be removed must not fail the scan.
                 if sweep {
                     let _ = if path.is_dir() {
@@ -53,7 +70,7 @@ impl Library {
                 }
                 continue;
             }
-            if name.starts_with('.') || !path.is_dir() || !path.join(METADATA_FILE).is_file() {
+            if hidden || !path.is_dir() || !path.join(METADATA_FILE).is_file() {
                 continue;
             }
             local.push(read_folder(path));
@@ -64,6 +81,14 @@ impl Library {
             local,
         })
     }
+}
+
+/// The folder name in a `.old-<16 hex>-<name>` entry.
+fn set_aside_name(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(".old-")?;
+    let (hex, original) = rest.split_at_checked(16)?;
+    let original = original.strip_prefix('-')?;
+    (hex.bytes().all(|b| b.is_ascii_hexdigit()) && !original.is_empty()).then_some(original)
 }
 
 fn read_folder(folder: PathBuf) -> LocalItem {
