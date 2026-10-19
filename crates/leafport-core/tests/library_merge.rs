@@ -240,3 +240,43 @@ fn open_creates_missing_root() {
     assert!(Library::open(&root).unwrap().local.is_empty());
     assert!(root.is_dir());
 }
+
+#[test]
+fn merge_gives_duplicate_resource_folders_unique_keys() {
+    let first = local("urn:uuid:a", "Alpha");
+    let mut second = local("urn:uuid:a", "Alpha copy");
+    second.folder = PathBuf::from("/books/Alpha copy");
+    let locals = [first, second];
+    let warning = "Another folder holds the same resource";
+    for cloud in [
+        vec![record(acsm("urn:uuid:a", Some("Alpha"), None))],
+        vec![],
+    ] {
+        let rows = merge(&cloud, &locals);
+        assert_eq!(rows.len(), 2);
+        let mut keys: Vec<_> = rows.iter().map(|r| r.key.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), 2);
+        let first = rows.iter().find(|r| r.key == "urn:uuid:a").unwrap();
+        assert_eq!(first.title, "Alpha");
+        assert!(first.warning.is_none());
+        let dup = rows.iter().find(|r| r.key == "local:Alpha copy").unwrap();
+        assert_eq!(dup.state, ItemState::Local);
+        assert_eq!(dup.warning.as_deref(), Some(warning));
+    }
+}
+
+#[test]
+fn rescan_keeps_tmp_entries_and_lists_items() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("Good")).unwrap();
+    metadata("urn:uuid:g", "Good")
+        .write(&root.join("Good"))
+        .unwrap();
+    std::fs::create_dir_all(root.join(".tmp-x")).unwrap();
+    let lib = Library::rescan(root).unwrap();
+    assert!(root.join(".tmp-x").is_dir());
+    assert_eq!(lib.local.len(), 1);
+}

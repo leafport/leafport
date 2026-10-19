@@ -25,6 +25,17 @@ impl Library {
     /// Creates `root` if needed, sweeps leftover `.tmp-*` entries and reads every title folder.
     pub fn open(root: &Path) -> Result<Library, LibraryError> {
         std::fs::create_dir_all(root)?;
+        Self::scan(root, true)
+    }
+
+    /// Like `open`, but leaves `.tmp-*` entries alone. Callers rescan while a sync may be
+    /// running, because its live temp folder must not be deleted.
+    pub fn rescan(root: &Path) -> Result<Library, LibraryError> {
+        std::fs::create_dir_all(root)?;
+        Self::scan(root, false)
+    }
+
+    fn scan(root: &Path, sweep: bool) -> Result<Library, LibraryError> {
         let mut local = Vec::new();
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
@@ -32,10 +43,13 @@ impl Library {
             let name = name.to_string_lossy();
             let path = entry.path();
             if name.starts_with(".tmp-") {
-                if path.is_dir() {
-                    let _ = std::fs::remove_dir_all(&path);
-                } else {
-                    let _ = std::fs::remove_file(&path);
+                // Best effort: a stale temp that cannot be removed must not fail the scan.
+                if sweep {
+                    let _ = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
                 }
                 continue;
             }
@@ -134,6 +148,15 @@ pub fn merge(cloud: &[DownloadRecord], local: &[LocalItem]) -> Vec<Item> {
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let mut used = vec![false; local.len()];
+    let mut claimed = HashSet::new();
+    let duplicate: Vec<bool> = local
+        .iter()
+        .map(|l| {
+            l.metadata
+                .as_ref()
+                .is_some_and(|m| !claimed.insert(m.resource.clone()))
+        })
+        .collect();
 
     for record in cloud {
         let Ok(summary) = acsm_summary(&record.acsm) else {
@@ -193,17 +216,31 @@ pub fn merge(cloud: &[DownloadRecord], local: &[LocalItem]) -> Vec<Item> {
         items.push(item);
     }
 
-    for (l, _) in local.iter().zip(&used).filter(|(_, u)| !**u) {
-        let (key, title, author, format) = match &l.metadata {
+    for (i, l) in local.iter().enumerate().filter(|(i, _)| !used[*i]) {
+        let (key, title, author, format, warning) = match &l.metadata {
+            Some(m) if duplicate[i] => (
+                format!("local:{}", folder_label(&l.folder)),
+                m.title.clone(),
+                m.author.clone(),
+                Format::from_mime(&m.format),
+                Some("Another folder holds the same resource".to_owned()),
+            ),
             Some(m) => (
                 m.resource.clone(),
                 m.title.clone(),
                 m.author.clone(),
                 Format::from_mime(&m.format),
+                l.warning.clone(),
             ),
             None => {
                 let name = folder_label(&l.folder);
-                (format!("local:{name}"), name, None, Format::Unknown)
+                (
+                    format!("local:{name}"),
+                    name,
+                    None,
+                    Format::Unknown,
+                    l.warning.clone(),
+                )
             }
         };
         items.push(Item {
@@ -217,7 +254,7 @@ pub fn merge(cloud: &[DownloadRecord], local: &[LocalItem]) -> Vec<Item> {
             publication: l.publication.clone(),
             cover: l.cover.clone(),
             metadata: l.metadata.clone(),
-            warning: l.warning.clone(),
+            warning,
         });
     }
 
