@@ -15,10 +15,9 @@ use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 use super::{Format, LibraryError};
+use crate::drm::{XMLENC, is_adept_data};
 use crate::{drm, fulfillment, pdf_drm};
 
-const XMLENC: &str = "http://www.w3.org/2001/04/xmlenc#";
-const AES128_CBC: &str = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
 const RIGHTS: &str = "META-INF/rights.xml";
 const ENCRYPTION: &str = "META-INF/encryption.xml";
 /// Caps for writing a decrypted EPUB.
@@ -189,14 +188,6 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
         }
     }
     Ok(out.finish().map_err(io::Error::from)?.into_inner())
-}
-
-/// Whether an `EncryptedData` element uses ADEPT AES-128-CBC (a missing method is the
-/// ADEPT default), mirroring `drm::is_adept_encryption`.
-fn is_adept_data(data: roxmltree::Node<'_, '_>) -> bool {
-    data.children()
-        .find(|node| node.has_tag_name((XMLENC, "EncryptionMethod")))
-        .is_none_or(|method| method.attribute("Algorithm") == Some(AES128_CBC))
 }
 
 /// encryption.xml with the ADEPT `EncryptedData` elements cut out of the original text,

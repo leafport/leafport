@@ -11,7 +11,7 @@ use std::{error::Error, fmt};
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 
 const ADEPT: &str = "http://ns.adobe.com/adept";
-const XMLENC: &str = "http://www.w3.org/2001/04/xmlenc#";
+pub(crate) const XMLENC: &str = "http://www.w3.org/2001/04/xmlenc#";
 const AES128_CBC: &str = "http://www.w3.org/2001/04/xmlenc#aes128-cbc";
 
 /// Upper bound on an inflated resource, guarding against deflate bombs.
@@ -112,7 +112,7 @@ fn parse_encryption(encryption_xml: &str) -> Result<roxmltree::Document<'_>, Drm
 
 /// Whether an EncryptedData entry is ADEPT AES-128-CBC. A missing EncryptionMethod is
 /// the ADEPT default; other algorithms (IDPF font obfuscation, Adobe PDF RC) are not.
-fn is_adept_data(data: roxmltree::Node<'_, '_>) -> bool {
+pub(crate) fn is_adept_data(data: roxmltree::Node<'_, '_>) -> bool {
     data.children()
         .find(|node| node.has_tag_name((XMLENC, "EncryptionMethod")))
         .is_none_or(|method| method.attribute("Algorithm") == Some(AES128_CBC))
