@@ -3,7 +3,49 @@ mod common;
 use leafport_core::fulfillment::{
     Acsm, AcsmError, ActivationToken, DeviceDescriptor, DeviceRole, FulfillResponseError,
     MAX_ACSM_BYTES, fulfill_url, loan_return_request, loan_return_url, parse_fulfillment,
+    require_web_url,
 };
+
+fn acsm_with_operator(url: &str) -> String {
+    format!(
+        r#"<fulfillmentToken xmlns="http://ns.adobe.com/adept"><operatorURL>{url}</operatorURL></fulfillmentToken>"#
+    )
+}
+
+#[test]
+fn acsm_rejects_bad_operator_urls() {
+    for url in [
+        "https://user:pw@acs.example/fulfillment",
+        "https://user@acs.example/fulfillment",
+        "https://acs.example/fulfillment#frag",
+        "ftp://acs.example/",
+        "not a url",
+    ] {
+        assert!(
+            matches!(
+                Acsm::parse(acsm_with_operator(url)),
+                Err(AcsmError::BadOperatorUrl)
+            ),
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn require_web_url_accepts_http_and_https() {
+    assert!(require_web_url("https://acs.example/fulfillment").is_ok());
+    assert!(require_web_url("http://acs.example/").is_ok());
+    assert!(require_web_url("ftp://acs.example/").is_err());
+}
+
+#[test]
+fn acsm_accepts_plain_http_operator_url() {
+    let acsm = Acsm::parse(acsm_with_operator(
+        "http://play.google.com/books/volumes/x/acsm",
+    ))
+    .unwrap();
+    assert_eq!(acsm.operator_url(), "http://play.google.com/books/volumes/x/acsm");
+}
 
 const ACSM: &str = r#"<?xml version="1.0"?>
 <fulfillmentToken fulfillmentType="buy" auth="user" xmlns="http://ns.adobe.com/adept" xmlns:request="urn:clash">
@@ -35,12 +77,12 @@ fn descriptor() -> DeviceDescriptor {
 }
 
 #[test]
-fn acsm_keeps_token_bytes_and_untrimmed_operator_text() {
+fn acsm_keeps_token_bytes_and_trims_operator_url() {
     let acsm = Acsm::parse(ACSM.to_owned()).unwrap();
     assert!(acsm.token_xml().starts_with("<fulfillmentToken "));
     assert!(acsm.token_xml().ends_with("</fulfillmentToken>"));
     assert_eq!(acsm.document_xml(), ACSM);
-    assert_eq!(acsm.operator_url(), " https://acs.example/fulfillment ");
+    assert_eq!(acsm.operator_url(), "https://acs.example/fulfillment");
 }
 
 #[test]
@@ -157,8 +199,47 @@ fn fulfillment_response_extracts_download_and_license() {
     );
     assert_eq!(
         result.license_token_xml.as_deref(),
-        Some("<licenseToken><encryptedKey>K</encryptedKey></licenseToken>")
+        Some(
+            r#"<licenseToken xmlns="http://ns.adobe.com/adept"><encryptedKey>K</encryptedKey></licenseToken>"#
+        )
     );
+    let token = result.license_token_xml.unwrap();
+    let document = roxmltree::Document::parse(&token).unwrap();
+    let key = document
+        .descendants()
+        .find(|node| node.tag_name().name() == "encryptedKey")
+        .unwrap();
+    assert_eq!(key.tag_name().namespace(), Some("http://ns.adobe.com/adept"));
+    assert!(result.loan_token_xml.is_none());
+}
+
+#[test]
+fn prefixed_license_token_parses_standalone() {
+    let xml = r#"<a:r xmlns:a="http://ns.adobe.com/adept" xmlns:x="urn:x"><a:src>https://h/b</a:src>
+        <a:licenseToken x:k="v"><a:encryptedKey>K</a:encryptedKey></a:licenseToken></a:r>"#;
+    let token = parse_fulfillment(xml).unwrap().license_token_xml.unwrap();
+    assert!(token.starts_with("<a:licenseToken xmlns:a=\"http://ns.adobe.com/adept\""));
+    let document = roxmltree::Document::parse(&token).unwrap();
+    let root = document.root_element();
+    assert!(root.has_tag_name(("http://ns.adobe.com/adept", "licenseToken")));
+    assert_eq!(root.attribute(("urn:x", "k")), Some("v"));
+    assert!(
+        root.children()
+            .any(|node| node.has_tag_name(("http://ns.adobe.com/adept", "encryptedKey")))
+    );
+}
+
+#[test]
+fn fulfillment_response_extracts_loan_token() {
+    let xml = r#"<r xmlns="http://ns.adobe.com/adept"><src>https://h/b</src>
+        <loanToken xmlns="http://ns.adobe.com/adept"><loan>L</loan></loanToken></r>"#;
+    let loan = parse_fulfillment(xml).unwrap().loan_token_xml.unwrap();
+    // Already declared on the element, so not duplicated.
+    assert_eq!(
+        loan,
+        r#"<loanToken xmlns="http://ns.adobe.com/adept"><loan>L</loan></loanToken>"#
+    );
+    roxmltree::Document::parse(&loan).unwrap();
 }
 
 #[test]

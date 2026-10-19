@@ -83,6 +83,27 @@ impl DeviceDescriptor {
 }
 pub const MAX_ACSM_BYTES: usize = 4 * 1024 * 1024;
 
+/// A URL that is not absolute http(s) with a host, without userinfo or fragment.
+#[derive(Debug)]
+pub struct BadUrl;
+
+/// Accept http or https URLs with a host, no username/password and no fragment.
+///
+/// Real ACSM files use plain `http://` operator URLs: ADEPT security rests on
+/// RSA request signatures, not TLS, so http is accepted.
+pub fn require_web_url(url: &str) -> Result<reqwest::Url, BadUrl> {
+    let url = reqwest::Url::parse(url.trim()).map_err(|_| BadUrl)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none_or(str::is_empty)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BadUrl);
+    }
+    Ok(url)
+}
+
 #[derive(Clone, Debug)]
 pub struct Acsm {
     /// Keep the entire document: inherited namespace declarations can matter
@@ -99,6 +120,7 @@ pub enum AcsmError {
     Xml(roxmltree::Error),
     MissingToken,
     MissingOperatorUrl,
+    BadOperatorUrl,
 }
 
 impl fmt::Display for AcsmError {
@@ -108,6 +130,7 @@ impl fmt::Display for AcsmError {
             Self::Xml(error) => write!(f, "invalid ACSM XML: {error}"),
             Self::MissingToken => write!(f, "E_ADEPT_NO_TOKEN"),
             Self::MissingOperatorUrl => write!(f, "E_ADEPT_NO_OPERATOR_URL"),
+            Self::BadOperatorUrl => write!(f, "E_ADEPT_BAD_OPERATOR_URL"),
         }
     }
 }
@@ -151,6 +174,7 @@ impl Acsm {
         if operator_url.trim().is_empty() {
             return Err(AcsmError::MissingOperatorUrl);
         }
+        require_web_url(&operator_url).map_err(|_| AcsmError::BadOperatorUrl)?;
         let token_range = token.range();
         let token_namespaces = token
             .namespaces()
@@ -165,7 +189,7 @@ impl Acsm {
             xml,
             token_range,
             token_namespaces,
-            operator_url,
+            operator_url: operator_url.trim().to_owned(),
         })
     }
 
@@ -267,8 +291,82 @@ pub struct Fulfillment {
     pub download_url: String,
     /// Declared content type of the download, when present (e.g. application/epub+zip).
     pub download_type: Option<String>,
-    /// The licenseToken subtree, retained verbatim for later rights handling.
+    /// The licenseToken subtree, retained verbatim for later rights handling;
+    /// inherited namespace bindings are re-declared so it parses standalone.
     pub license_token_xml: Option<String>,
+    /// The loanToken subtree, standalone like `license_token_xml`.
+    pub loan_token_xml: Option<String>,
+}
+
+/// Original element slice with every inherited in-scope namespace re-declared on its
+/// start tag, so the slice parses as a standalone document with the same infoset.
+pub fn standalone_element(xml: &str, node: roxmltree::Node) -> String {
+    let slice = &xml[node.range()];
+    let bytes = slice.as_bytes();
+    let name_end = slice[1..]
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .map_or(slice.len(), |index| index + 1);
+    // Collect the declarations the start tag already carries.
+    let mut declared = Vec::new();
+    let mut index = name_end;
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || bytes[index] == b'/' || bytes[index] == b'>' {
+            break;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index] != b'=' && !bytes[index].is_ascii_whitespace()
+        {
+            index += 1;
+        }
+        let name = &slice[start..index];
+        while index < bytes.len() && bytes[index] != b'"' && bytes[index] != b'\'' {
+            index += 1;
+        }
+        let Some(&quote) = bytes.get(index) else {
+            break;
+        };
+        index += 1;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        index += 1;
+        if name == "xmlns" {
+            declared.push(None);
+        } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+            declared.push(Some(prefix));
+        }
+    }
+    let mut out = String::with_capacity(slice.len() + 64);
+    out.push_str(&slice[..name_end]);
+    for namespace in node.namespaces() {
+        let name = namespace.name();
+        if name == Some("xml") || declared.contains(&name) {
+            continue;
+        }
+        out.push_str(" xmlns");
+        if let Some(name) = name {
+            out.push(':');
+            out.push_str(name);
+        }
+        out.push_str("=\"");
+        for character in namespace.uri().chars() {
+            match character {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '"' => out.push_str("&quot;"),
+                '\r' => out.push_str("&#13;"),
+                '\n' => out.push_str("&#10;"),
+                '\t' => out.push_str("&#9;"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+    }
+    out.push_str(&slice[name_end..]);
+    out
 }
 
 #[derive(Debug)]
@@ -337,15 +435,14 @@ pub fn parse_fulfillment(xml: &str) -> Result<Fulfillment, FulfillResponseError>
         .ok_or(FulfillResponseError::MissingDownload)?;
     let download_type = find("downloadType").map(text).filter(|v| !v.is_empty());
     let resource = find("resource").map(text).filter(|v| !v.is_empty());
-    let license_token_xml = find("licenseToken").map(|node| {
-        let range = node.range();
-        xml[range].to_owned()
-    });
+    let license_token_xml = find("licenseToken").map(|node| standalone_element(xml, node));
+    let loan_token_xml = find("loanToken").map(|node| standalone_element(xml, node));
     Ok(Fulfillment {
         resource,
         download_url,
         download_type,
         license_token_xml,
+        loan_token_xml,
     })
 }
 
@@ -363,6 +460,8 @@ pub enum FulfillError {
     DownloadHttp {
         status: reqwest::StatusCode,
     },
+    BadDownloadUrl,
+    BadOperatorUrl,
 }
 
 impl fmt::Display for FulfillError {
@@ -375,6 +474,8 @@ impl fmt::Display for FulfillError {
             Self::Response(error) => error.fmt(f),
             Self::Download(error) => write!(f, "book download failed: {error}"),
             Self::DownloadHttp { status } => write!(f, "book download failed: HTTP {status}"),
+            Self::BadDownloadUrl => write!(f, "E_ADEPT_BAD_DOWNLOAD_URL"),
+            Self::BadOperatorUrl => write!(f, "E_ADEPT_BAD_OPERATOR_URL"),
         }
     }
 }
@@ -419,8 +520,10 @@ pub fn perform_fulfillment(
     }
     let xml = String::from_utf8(response.body).map_err(FulfillError::Utf8)?;
     let fulfillment = parse_fulfillment(&xml).map_err(FulfillError::Response)?;
+    let download_url =
+        require_web_url(&fulfillment.download_url).map_err(|_| FulfillError::BadDownloadUrl)?;
     let download = client
-        .fetch(&fulfillment.download_url, MAX_BOOK_BYTES)
+        .fetch(download_url.as_str(), MAX_BOOK_BYTES)
         .map_err(FulfillError::Download)?;
     if !download.status.is_success() {
         return Err(FulfillError::DownloadHttp {
@@ -462,8 +565,31 @@ pub fn loan_return_request(
     crate::signing::sign_request(&xml, key)
 }
 
-/// Perform a loan return: POST the signed request to operatorURL/LoanReturn. A non-error
-/// response is treated as acceptance; an ADEPT `error` root is retained and returned.
+/// Fail when a response body is an ADEPT `error` root; any other well-formed XML passes.
+fn check_not_error(xml: &str) -> Result<(), FulfillResponseError> {
+    if xml.len() > MAX_ACSM_BYTES {
+        return Err(FulfillResponseError::TooLarge);
+    }
+    let document = roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 50_000,
+            entity_resolver: None,
+        },
+    )
+    .map_err(FulfillResponseError::Xml)?;
+    if document.root_element().has_tag_name((ADEPT, "error")) {
+        return Err(FulfillResponseError::Service {
+            xml: xml.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Perform a loan return: POST the signed request to operatorURL/LoanReturn. A well-formed
+/// non-error 2xx response is acceptance; an ADEPT `error` root (even with 2xx) is
+/// retained and returned.
 pub fn perform_loan_return(
     client: &crate::service::ServiceClient,
     operator_url: &str,
@@ -472,6 +598,7 @@ pub fn perform_loan_return(
     loan_token_xml: &str,
     key: &rsa::RsaPrivateKey,
 ) -> Result<(), FulfillError> {
+    require_web_url(operator_url).map_err(|_| FulfillError::BadOperatorUrl)?;
     let request =
         loan_return_request(user, device, loan_token_xml, key).map_err(FulfillError::Build)?;
     let response = client
@@ -479,7 +606,7 @@ pub fn perform_loan_return(
         .map_err(FulfillError::Transport)?;
     if !response.status.is_success() {
         if let Ok(xml) = std::str::from_utf8(&response.body) {
-            if let Err(error @ FulfillResponseError::Service { .. }) = parse_fulfillment(xml) {
+            if let Err(error @ FulfillResponseError::Service { .. }) = check_not_error(xml) {
                 return Err(FulfillError::Response(error));
             }
         }
@@ -488,5 +615,6 @@ pub fn perform_loan_return(
             body: response.body,
         });
     }
-    Ok(())
+    let xml = String::from_utf8(response.body).map_err(FulfillError::Utf8)?;
+    check_not_error(&xml).map_err(FulfillError::Response)
 }
