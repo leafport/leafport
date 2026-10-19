@@ -184,38 +184,258 @@ impl ActivationState {
     }
 }
 
+/// Largest secret stored in a single entry. Windows Credential Manager caps a blob at
+/// 2560 bytes; larger secrets are split across `"{account}#{gen}.{i}"` entries.
+pub const CHUNK_SIZE: usize = 2048;
+
+/// Header magic of a legacy chunked secret: the magic followed by the u32 LE chunk
+/// count, with chunks in `"{account}#{i}"`. Still read; never written.
+pub const CHUNK_MAGIC_V1: &[u8; 4] = b"RCH1";
+
+/// Header magic of a generational chunked secret: the magic, the u32 LE generation,
+/// the u32 LE chunk count and the SHA-1 digest of the whole secret. Chunks live in
+/// `"{account}#{gen}.{i}"`, so a save writes a fresh generation and flips the header.
+pub const CHUNK_MAGIC: &[u8; 4] = b"RCH2";
+
+/// Extra chunk indexes probed past the known count when sweeping leftovers.
+const SWEEP_EXTRA: usize = 8;
+
+const DIGEST_LEN: usize = 20;
+
+/// Which chunk entries a header entry refers to.
+#[derive(Clone, Copy)]
+enum ChunkLayout {
+    /// No chunks are known (absent, unchunked or unreadable header).
+    Unknown,
+    Legacy {
+        count: usize,
+    },
+    Generation {
+        generation: u32,
+        count: usize,
+    },
+}
+
+/// Adapter that splits secrets larger than `CHUNK_SIZE` across several entries of the
+/// wrapped store. Secrets stored unchunked by an older version still load as-is.
+pub struct ChunkedStore<S: CredentialStore>(pub S);
+
+impl<S: CredentialStore> ChunkedStore<S> {
+    fn chunk_account(account: &str, layout: ChunkLayout, index: usize) -> String {
+        match layout {
+            ChunkLayout::Generation { generation, .. } => format!("{account}#{generation}.{index}"),
+            _ => format!("{account}#{index}"),
+        }
+    }
+
+    fn parse_header(header: &[u8]) -> Result<ChunkLayout, StoreError> {
+        let word = |at: usize| {
+            u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        if header.starts_with(CHUNK_MAGIC_V1) {
+            if header.len() != 8 {
+                return Err(StoreError::Corrupt("malformed chunk header"));
+            }
+            Ok(ChunkLayout::Legacy {
+                count: word(4) as usize,
+            })
+        } else if header.starts_with(CHUNK_MAGIC) {
+            if header.len() != 12 + DIGEST_LEN {
+                return Err(StoreError::Corrupt("malformed chunk header"));
+            }
+            Ok(ChunkLayout::Generation {
+                generation: word(4),
+                count: word(8) as usize,
+            })
+        } else {
+            Ok(ChunkLayout::Unknown)
+        }
+    }
+
+    /// The chunk layout currently referenced by `account`'s header entry.
+    fn current_layout(&self, account: &str) -> Result<ChunkLayout, StoreError> {
+        match self.0.load(account)? {
+            Some(mut header) => {
+                let layout = Self::parse_header(&header).unwrap_or(ChunkLayout::Unknown);
+                header.zeroize();
+                Ok(layout)
+            }
+            None => Ok(ChunkLayout::Unknown),
+        }
+    }
+
+    /// Delete the `layout`'s chunks from `first`, then probe `SWEEP_EXTRA` further
+    /// indexes. Gaps do not stop the sweep, so no fragment is orphaned.
+    fn delete_chunks(
+        &self,
+        account: &str,
+        layout: ChunkLayout,
+        first: usize,
+    ) -> Result<(), StoreError> {
+        let count = match layout {
+            ChunkLayout::Unknown => 0,
+            ChunkLayout::Legacy { count } | ChunkLayout::Generation { count, .. } => count,
+        };
+        for index in first..count.max(first) + SWEEP_EXTRA {
+            let name = Self::chunk_account(account, layout, index);
+            if let Some(mut chunk) = self.0.load(&name)? {
+                chunk.zeroize();
+                self.0.delete(&name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Probe-only layout of a generation adjacent to `layout`'s, which an interrupted
+    /// save may have left behind.
+    fn neighbour(layout: ChunkLayout, step: i32) -> Option<ChunkLayout> {
+        match layout {
+            ChunkLayout::Generation { generation, .. } => Some(ChunkLayout::Generation {
+                generation: generation.wrapping_add_signed(step),
+                count: 0,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Delete every chunk `layout` refers to plus leftovers of the adjacent generations.
+    fn delete_all_chunks(&self, account: &str, layout: ChunkLayout) -> Result<(), StoreError> {
+        for stale in [Self::neighbour(layout, -1), Self::neighbour(layout, 1)]
+            .into_iter()
+            .flatten()
+        {
+            self.delete_chunks(account, stale, 0)?;
+        }
+        self.delete_chunks(account, layout, 0)
+    }
+
+    fn read_chunks(
+        &self,
+        account: &str,
+        layout: ChunkLayout,
+        count: usize,
+    ) -> Result<Vec<u8>, StoreError> {
+        let mut secret = Vec::new();
+        for index in 0..count {
+            match self.0.load(&Self::chunk_account(account, layout, index)) {
+                Ok(Some(mut chunk)) => {
+                    secret.extend_from_slice(&chunk);
+                    chunk.zeroize();
+                }
+                Ok(None) => {
+                    secret.zeroize();
+                    return Err(StoreError::Corrupt("missing chunk"));
+                }
+                Err(error) => {
+                    secret.zeroize();
+                    return Err(error);
+                }
+            }
+        }
+        Ok(secret)
+    }
+
+    fn digest(secret: &[u8]) -> [u8; DIGEST_LEN] {
+        use sha1::{Digest, Sha1};
+        Sha1::digest(secret).into()
+    }
+}
+
+impl<S: CredentialStore> CredentialStore for ChunkedStore<S> {
+    fn load(&self, account: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(header) = self.0.load(account)? else {
+            return Ok(None);
+        };
+        let layout = Self::parse_header(&header)?;
+        match layout {
+            ChunkLayout::Unknown => Ok(Some(header)),
+            ChunkLayout::Legacy { count } => self.read_chunks(account, layout, count).map(Some),
+            ChunkLayout::Generation { count, .. } => {
+                let mut secret = self.read_chunks(account, layout, count)?;
+                if Self::digest(&secret)[..] != header[12..] {
+                    secret.zeroize();
+                    return Err(StoreError::Corrupt("chunk digest mismatch"));
+                }
+                Ok(Some(secret))
+            }
+        }
+    }
+
+    fn save(&self, account: &str, secret: &[u8]) -> Result<(), StoreError> {
+        let old = self.current_layout(account)?;
+        // A small secret that happens to begin with either magic is chunked too, so load
+        // never misreads it as a header.
+        if secret.len() <= CHUNK_SIZE
+            && !secret.starts_with(CHUNK_MAGIC)
+            && !secret.starts_with(CHUNK_MAGIC_V1)
+        {
+            self.0.save(account, secret)?;
+            return self.delete_all_chunks(account, old);
+        }
+        // An interrupted cleanup may have left the generation before `old` behind.
+        if let Some(stale) = Self::neighbour(old, -1) {
+            self.delete_chunks(account, stale, 0)?;
+        }
+        let generation = match old {
+            ChunkLayout::Generation { generation, .. } => generation.wrapping_add(1),
+            _ => 0,
+        };
+        let mut layout = ChunkLayout::Generation {
+            generation,
+            count: 0,
+        };
+        // New chunks go to a fresh generation; the old header stays valid until the
+        // header write below flips to it.
+        let mut count = 0;
+        for chunk in secret.chunks(CHUNK_SIZE) {
+            self.0
+                .save(&Self::chunk_account(account, layout, count), chunk)?;
+            count += 1;
+        }
+        layout = ChunkLayout::Generation { generation, count };
+        let mut header = CHUNK_MAGIC.to_vec();
+        header.extend_from_slice(&generation.to_le_bytes());
+        header.extend_from_slice(&(count as u32).to_le_bytes());
+        header.extend_from_slice(&Self::digest(secret));
+        self.0.save(account, &header)?;
+        // Sweep leftovers of an earlier interrupted save into this generation.
+        self.delete_chunks(account, layout, count)?;
+        self.delete_chunks(account, old, 0)
+    }
+
+    fn delete(&self, account: &str) -> Result<(), StoreError> {
+        // Chunks first, header last: an interrupted delete keeps the header, so a later
+        // delete still knows which chunks to remove.
+        let layout = self.current_layout(account)?;
+        self.delete_all_chunks(account, layout)?;
+        self.0.delete(account)
+    }
+}
+
 #[cfg(feature = "keyring")]
 pub use keyring_store::KeyringStore;
 
 #[cfg(feature = "keyring")]
 mod keyring_store {
-    use super::{CredentialStore, StoreError};
+    use super::{ChunkedStore, CredentialStore, StoreError};
 
     /// Default service name for the OS credential store entry.
     pub const DEFAULT_SERVICE: &str = "net.leafport.activation";
 
     /// OS credential-store adapter: Secret Service / keyutils on Linux, Keychain on
     /// macOS, Credential Manager on Windows, as provided by the `keyring` crate.
-    pub struct KeyringStore {
-        service: String,
-    }
+    /// Secrets are chunked to stay under Credential Manager's per-blob limit.
+    pub struct KeyringStore(ChunkedStore<RawKeyringStore>);
 
     impl KeyringStore {
         pub fn new() -> Self {
-            Self {
-                service: DEFAULT_SERVICE.to_owned(),
-            }
+            Self::with_service(DEFAULT_SERVICE)
         }
 
         pub fn with_service(service: impl Into<String>) -> Self {
-            Self {
+            Self(ChunkedStore(RawKeyringStore {
                 service: service.into(),
-            }
-        }
-
-        fn entry(&self, account: &str) -> Result<keyring::Entry, StoreError> {
-            keyring::Entry::new(&self.service, account)
-                .map_err(|error| StoreError::Backend(Box::new(error)))
+            }))
         }
     }
 
@@ -226,6 +446,32 @@ mod keyring_store {
     }
 
     impl CredentialStore for KeyringStore {
+        fn load(&self, account: &str) -> Result<Option<Vec<u8>>, StoreError> {
+            self.0.load(account)
+        }
+
+        fn save(&self, account: &str, secret: &[u8]) -> Result<(), StoreError> {
+            self.0.save(account, secret)
+        }
+
+        fn delete(&self, account: &str) -> Result<(), StoreError> {
+            self.0.delete(account)
+        }
+    }
+
+    /// One keyring entry per account, without chunking.
+    struct RawKeyringStore {
+        service: String,
+    }
+
+    impl RawKeyringStore {
+        fn entry(&self, account: &str) -> Result<keyring::Entry, StoreError> {
+            keyring::Entry::new(&self.service, account)
+                .map_err(|error| StoreError::Backend(Box::new(error)))
+        }
+    }
+
+    impl CredentialStore for RawKeyringStore {
         fn load(&self, account: &str) -> Result<Option<Vec<u8>>, StoreError> {
             match self.entry(account)?.get_secret() {
                 Ok(secret) => Ok(Some(secret)),
