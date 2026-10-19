@@ -21,3 +21,5 @@ aes = "0.8.4"
 cbc = { version = "0.1.2", features = ["alloc"] }
 flate2 = "1.0.35"
 lopdf = "0.42"
+md-5 = "0.10.6"
+rc4 = "0.1"
