@@ -45,11 +45,72 @@ enum Event {
     Sync(Result<usize, String>),
     /// A completed cloud upload (SyncToCloud): unit on success, or an error message.
     Upload(Result<(), String>),
-    /// A completed fulfillment: the saved book path, or an error message.
-    Fulfilled(Result<PathBuf, String>),
+    /// A completed fulfillment: the saved book path and an optional sidecar warning, or an
+    /// error message.
+    Fulfilled(Result<(PathBuf, Option<String>), String>),
     /// A completed loan return: the returned book path, or an error message.
     LoanReturned(Result<PathBuf, String>),
+    /// A completed full-layout extraction: (book path, extraction dir, section href), or
+    /// (book path, error message).
+    LayoutReady(Result<(PathBuf, PathBuf, String), (PathBuf, String)>),
 }
+
+/// Run a worker body, converting a panic into an Err so the completion event is always sent.
+fn catch_panic<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".into());
+        Err(format!("internal error: {message}"))
+    })
+}
+
+/// Remove a sidecar file; returns a warning if removal failed for a reason other than absence.
+fn remove_sidecar(path: &std::path::Path) -> Option<String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!("could not remove stale {}: {e}", path.display())),
+    }
+}
+
+/// Remove `leafport-layout-<pid>-*` temp directories left by dead processes (Linux only).
+#[cfg(target_os = "linux")]
+fn sweep_stale_layouts() {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(uid) = std::fs::metadata("/proc/self").map(|m| m.uid()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("leafport-layout-"))
+        else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.is_dir() && meta.uid() == uid {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sweep_stale_layouts() {}
 
 /// Directory where fulfilled publications are written, under the platform data dir.
 fn books_dir() -> Result<PathBuf, String> {
@@ -128,8 +189,7 @@ fn loan_token_from_epub(bytes: &[u8]) -> Option<String> {
     let node = document
         .descendants()
         .find(|node| node.has_tag_name(("http://ns.adobe.com/adept", "loanToken")))?;
-    let range = node.range();
-    Some(rights[range].to_owned())
+    Some(fulfillment::standalone_element(&rights, node))
 }
 
 /// Reduce an identifier to a safe filename stem (alphanumeric, dash, underscore).
@@ -185,6 +245,10 @@ struct Desktop {
     textures: std::collections::HashMap<String, egui::TextureHandle>,
     /// Per-book extraction directory for the full-layout (webview) view.
     extract_dirs: std::collections::HashMap<PathBuf, PathBuf>,
+    /// Private per-run directory holding extracted books, removed on exit.
+    layout_root: Option<PathBuf>,
+    /// Books whose full-layout extraction is in flight.
+    pending_layouts: std::collections::HashSet<PathBuf>,
 }
 
 /// Locate the leafport-reader webview helper binary: next to this executable, or in the same
@@ -265,7 +329,10 @@ impl Desktop {
             note_key: None,
             textures: std::collections::HashMap::new(),
             extract_dirs: std::collections::HashMap::new(),
+            layout_root: None,
+            pending_layouts: std::collections::HashSet::new(),
         };
+        sweep_stale_layouts();
         match load_signed_in() {
             Ok(Some(user)) => {
                 app.sign_in_status = format!("Signed in as {user}.");
@@ -292,13 +359,13 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let mut catalog = VendorCatalog::new();
                 ServiceClient::new()
                     .and_then(|client| client.load_vendors(&mut catalog))
                     .map_err(|e| e.to_string())?;
                 Ok(catalog)
-            })();
+            });
             let _ = tx.send(Event::Vendors(result));
             ctx.request_repaint();
         });
@@ -334,12 +401,32 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let client = ServiceClient::new().map_err(|e| e.to_string())?;
                 // Device key and activation keys are generated locally for this device.
                 // The 16-byte device key is random and persisted with the activation state.
-                let device_key = activation::generate_device_key();
-                let keys = ActivationKeys::generate().map_err(|e| e.to_string())?;
+                // Reuse an existing activation so books fulfilled under it stay readable.
+                let (device_key, keys, device, fingerprint) =
+                    match ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT) {
+                        Ok(Some(existing)) => (
+                            existing.device_key,
+                            existing.keys,
+                            existing.device,
+                            existing.fingerprint,
+                        ),
+                        Ok(None) => {
+                            let device_key = activation::generate_device_key();
+                            let keys = ActivationKeys::generate().map_err(|e| e.to_string())?;
+                            let device = activation::device_id(&device_key);
+                            let fingerprint = machine_fingerprint(&device_key);
+                            (device_key, keys, device, fingerprint)
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "credential store unreadable: {e} — not replacing existing activation"
+                            ));
+                        }
+                    };
                 let signed = activation::perform_sign_in(
                     &client,
                     &auth_url,
@@ -352,8 +439,8 @@ impl Desktop {
                 )
                 .map_err(|e| e.to_string())?;
                 let state = ActivationState {
-                    device: activation::device_id(&device_key),
-                    fingerprint: machine_fingerprint(&device_key),
+                    device,
+                    fingerprint,
                     device_key,
                     keys,
                     user: signed.user.clone(),
@@ -363,7 +450,7 @@ impl Desktop {
                     .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?;
                 Ok(signed.user)
-            })();
+            });
             // password/username were moved in and dropped here; nothing is returned.
             let _ = tx.send(Event::SignIn(result));
             ctx.request_repaint();
@@ -392,7 +479,7 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let state = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "not signed in".to_string())?;
@@ -402,7 +489,7 @@ impl Desktop {
                     .download(&state.user, None, None, &state.keys.license)
                     .map_err(|e| e.to_string())?;
                 Ok(records.len())
-            })();
+            });
             let _ = tx.send(Event::Sync(result));
             ctx.request_repaint();
         });
@@ -417,7 +504,7 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let state = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "not signed in".to_string())?;
@@ -426,7 +513,7 @@ impl Desktop {
                 client
                     .upload(&state.user, &bytes, &state.keys.license)
                     .map_err(|e| e.to_string())
-            })();
+            });
             let _ = tx.send(Event::Upload(result));
             ctx.request_repaint();
         });
@@ -443,7 +530,7 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let state = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "not signed in".to_string())?;
@@ -512,23 +599,42 @@ impl Desktop {
                 write_atomic(&path, &fulfilled.body).map_err(|e| e.to_string())?;
                 // Save the licenseToken beside a PDF so its EBX DRM can be decrypted on
                 // open (EPUBs carry their rights inside the archive and need no sidecar).
-                if extension == "pdf" {
-                    if let Some(token) = fulfilled.fulfillment.license_token_xml.as_deref() {
-                        let _ = write_atomic(&license_sidecar_path(&path), token.as_bytes());
+                let mut warnings: Vec<String> = Vec::new();
+                let license_sidecar = license_sidecar_path(&path);
+                match fulfilled.fulfillment.license_token_xml.as_deref() {
+                    Some(token) if extension == "pdf" => {
+                        if let Err(e) = write_atomic(&license_sidecar, token.as_bytes()) {
+                            warnings.push(format!("could not save license sidecar: {e}"));
+                        }
                     }
+                    _ => warnings.extend(remove_sidecar(&license_sidecar)),
                 }
                 // If this is a borrowed title, save a loan sidecar so it can be returned.
-                if let Some(loan_token_xml) = loan_token_from_epub(&fulfilled.body) {
+                let loan_sidecar = loan_sidecar_path(&path);
+                if let Some(loan_token_xml) = fulfilled
+                    .fulfillment
+                    .loan_token_xml
+                    .clone()
+                    .or_else(|| loan_token_from_epub(&fulfilled.body))
+                {
                     let info = LoanInfo {
                         operator_url: acsm.operator_url().to_owned(),
                         loan_token_xml,
                     };
-                    if let Ok(json) = serde_json::to_vec_pretty(&info) {
-                        let _ = write_atomic(&loan_sidecar_path(&path), &json);
+                    match serde_json::to_vec_pretty(&info) {
+                        Ok(json) => {
+                            if let Err(e) = write_atomic(&loan_sidecar, &json) {
+                                warnings.push(format!("could not save loan sidecar: {e}"));
+                            }
+                        }
+                        Err(e) => warnings.push(format!("could not encode loan sidecar: {e}")),
                     }
+                } else {
+                    warnings.extend(remove_sidecar(&loan_sidecar));
                 }
-                Ok(path)
-            })();
+                let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+                Ok((path, warning))
+            });
             let _ = tx.send(Event::Fulfilled(result));
             ctx.request_repaint();
         });
@@ -544,7 +650,7 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = catch_panic(|| {
                 let state = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "not signed in".to_string())?;
@@ -567,7 +673,7 @@ impl Desktop {
                 let _ = std::fs::remove_file(&sidecar);
                 let _ = std::fs::remove_file(license_sidecar_path(&book_path));
                 Ok(book_path)
-            })();
+            });
             let _ = tx.send(Event::LoanReturned(result));
             ctx.request_repaint();
         });
@@ -575,7 +681,7 @@ impl Desktop {
     /// Open the current EPUB section in a webview window for full HTML/CSS layout. The
     /// book's resources are extracted (decrypted) to a per-book temp directory once, then
     /// the leafport-reader helper renders the section file with its real styling.
-    fn open_full_layout(&mut self) {
+    fn open_full_layout(&mut self, ctx: &egui::Context) {
         let Some(index) = self.selected else {
             return;
         };
@@ -591,37 +697,100 @@ impl Desktop {
             self.status = "Full layout is available for EPUB sections only.".into();
             return;
         }
+        if reader_helper().is_none() {
+            self.status =
+                "Full-layout viewer (leafport-reader) is not installed next to the app.".into();
+            return;
+        }
+        // Already extracted: launch directly.
+        if let Some(dir) = self.extract_dirs.get(&book_path).cloned() {
+            self.launch_layout(&dir, &href);
+            return;
+        }
+        let root = match self.layout_root() {
+            Ok(root) => root,
+            Err(error) => {
+                self.status = format!("Full layout unavailable: {error}");
+                return;
+            }
+        };
+        if !self.pending_layouts.insert(book_path.clone()) {
+            self.status = "Already preparing the full-layout view for this book.".into();
+            return;
+        }
+        // Extract the book once (decrypting with the stored license key if protected) on a
+        // worker thread, since the credential store may block on an unlock prompt.
+        self.status = "Preparing the full-layout view…".into();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let error_path = book_path.clone();
+            let result = catch_panic(|| {
+                let license_key = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
+                    .ok()
+                    .flatten()
+                    .map(|state| state.keys.license);
+                use sha1::{Digest, Sha1};
+                let digest = Sha1::digest(book_path.as_os_str().as_encoded_bytes());
+                let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+                let dir = root.join(name);
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| epub::extract_to_dir(&book_path, license_key.as_ref(), &dir))
+                    .map(|_| (book_path, dir, href))
+            })
+            .map_err(|e| (error_path, e));
+            let _ = tx.send(Event::LayoutReady(result));
+            ctx.request_repaint();
+        });
+    }
+    /// The private per-run directory holding extracted books, created on first use with
+    /// owner-only permissions. Creation fails rather than reusing an existing path.
+    fn layout_root(&mut self) -> Result<PathBuf, String> {
+        if let Some(root) = &self.layout_root {
+            return Ok(root.clone());
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!(
+            "leafport-layout-{}-{nanos:x}",
+            std::process::id()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&root).map_err(|e| e.to_string())?;
+        self.layout_root = Some(root.clone());
+        Ok(root)
+    }
+    /// Launch the leafport-reader helper on one extracted section file.
+    fn launch_layout(&mut self, dir: &std::path::Path, href: &str) {
         let Some(helper) = reader_helper() else {
             self.status =
                 "Full-layout viewer (leafport-reader) is not installed next to the app.".into();
             return;
         };
-        // Extract the book once (decrypting with the stored license key if protected).
-        if !self.extract_dirs.contains_key(&book_path) {
-            let license_key = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
-                .ok()
-                .flatten()
-                .map(|state| state.keys.license);
-            let mut dir = std::env::temp_dir();
-            dir.push(format!("leafport-layout-{}", std::process::id()));
-            dir.push(sanitize_stem(&book_path.to_string_lossy()));
-            if let Err(error) = std::fs::create_dir_all(&dir)
-                .map_err(|e| e.to_string())
-                .and_then(|_| epub::extract_to_dir(&book_path, license_key.as_ref(), &dir))
-            {
-                self.status = format!("Full layout unavailable: {error}");
-                return;
-            }
-            self.extract_dirs.insert(book_path.clone(), dir);
-        }
-        let chapter_file = self.extract_dirs[&book_path].join(&href);
         match std::process::Command::new(&helper)
-            .arg(&chapter_file)
+            .arg(dir.join(href))
             .spawn()
         {
             Ok(_) => self.status = "Opened the section in the full-layout viewer.".into(),
             Err(error) => self.status = format!("Could not launch the full-layout viewer: {error}"),
         }
+    }
+    /// Drop a book's decrypted extraction directory and cached textures.
+    fn discard_extracted(&mut self, path: &std::path::Path) {
+        if let Some(dir) = self.extract_dirs.remove(path) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let prefix = texture_key(path, 0);
+        let prefix = &prefix[..prefix.len() - 1];
+        self.textures.retain(|key, _| !key.starts_with(prefix));
     }
     fn import(&mut self, path: PathBuf, ctx: &egui::Context) {
         let path = path.canonicalize().unwrap_or(path);
@@ -629,24 +798,26 @@ impl Desktop {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            // Load the device license key so ADEPT-protected books can be decrypted.
-            // Absent or signed-out: protected books stay blocked, plain EPUBs still open.
-            let license_key = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
-                .ok()
-                .flatten()
-                .map(|state| state.keys.license);
-            let is_pdf = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
-            let result = if is_pdf {
-                // Load the licenseToken sidecar (if present) to decrypt an EBX-DRM PDF.
-                let token = std::fs::read_to_string(license_sidecar_path(&path)).ok();
-                pdf::open(&path, license_key.as_ref(), token.as_deref())
-            } else {
-                epub::open(&path, license_key.as_ref())
-            }
-            .map_err(|e| format!("{}: {e}", path.display()));
+            let result = catch_panic(|| {
+                // Load the device license key so ADEPT-protected books can be decrypted.
+                // Absent or signed-out: protected books stay blocked, plain EPUBs still open.
+                let license_key = ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
+                    .ok()
+                    .flatten()
+                    .map(|state| state.keys.license);
+                let is_pdf = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+                let opened = if is_pdf {
+                    // Load the licenseToken sidecar (if present) to decrypt an EBX-DRM PDF.
+                    let token = std::fs::read_to_string(license_sidecar_path(&path)).ok();
+                    pdf::open(&path, license_key.as_ref(), token.as_deref())
+                } else {
+                    epub::open(&path, license_key.as_ref())
+                };
+                opened.map_err(|e| format!("{}: {e}", path.display()))
+            });
             let _ = tx.send(Event::Book(result));
             ctx.request_repaint();
         });
@@ -655,6 +826,11 @@ impl Desktop {
 impl eframe::App for Desktop {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "library", &self.saved);
+    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(root) = self.layout_root.take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         while let Ok(event) = self.rx.try_recv() {
@@ -701,8 +877,11 @@ impl eframe::App for Desktop {
                 Event::Fulfilled(result) => {
                     self.fulfilling = false;
                     match result {
-                        Ok(path) => {
+                        Ok((path, warning)) => {
                             self.status = format!("Fulfilled and saved {}.", path.display());
+                            if let Some(warning) = warning {
+                                self.status.push_str(&format!(" Warning: {warning}."));
+                            }
                             self.import(path, ctx);
                         }
                         Err(error) => self.status = format!("Fulfillment failed: {error}"),
@@ -712,17 +891,41 @@ impl eframe::App for Desktop {
                     self.fulfilling = false;
                     match result {
                         Ok(path) => {
+                            self.note_key = None;
+                            self.note_buffer.clear();
+                            self.discard_extracted(&path);
                             if let Some(index) = self.books.iter().position(|b| b.path == path) {
                                 self.books.remove(index);
                             }
                             self.saved.paths.retain(|p| *p != path);
                             self.saved.positions.remove(&path);
+                            self.saved.bookmarks.remove(&path);
+                            let prefix = note_key(&path, 0);
+                            let prefix = &prefix[..prefix.len() - 1];
+                            self.saved.notes.retain(|key, _| !key.starts_with(prefix));
                             self.selected = None;
+                            self.chapter = 0;
                             self.status = "Loan returned. Local copy removed.".into();
                         }
                         Err(error) => self.status = format!("Loan return failed: {error}"),
                     }
                 }
+                Event::LayoutReady(result) => match result {
+                    Ok((book_path, dir, href)) => {
+                        self.pending_layouts.remove(&book_path);
+                        if self.books.iter().any(|b| b.path == book_path) {
+                            self.extract_dirs.insert(book_path, dir.clone());
+                            self.launch_layout(&dir, &href);
+                        } else {
+                            // The book was removed while extracting; drop the copy.
+                            let _ = std::fs::remove_dir_all(dir);
+                        }
+                    }
+                    Err((book_path, error)) => {
+                        self.pending_layouts.remove(&book_path);
+                        self.status = format!("Full layout unavailable: {error}");
+                    }
+                },
                 Event::Book(result) => {
                     self.importing = self.importing.saturating_sub(1);
                     match result {
@@ -737,6 +940,11 @@ impl eframe::App for Desktop {
                                 .min(book.chapters.len().saturating_sub(1));
                             if let Some(index) = self.books.iter().position(|b| b.path == book.path)
                             {
+                                // Replace the stale entry so re-fulfilled or newly
+                                // unblocked books show their current content.
+                                let path = book.path.clone();
+                                self.discard_extracted(&path);
+                                self.books[index] = book;
                                 self.selected = Some(index);
                             } else {
                                 if !self.saved.paths.contains(&book.path) {
@@ -841,7 +1049,10 @@ impl eframe::App for Desktop {
                     });
                 if let Some(index) = self.selected {
                     if ui.small_button("Remove from library").clicked() {
+                        self.note_key = None;
+                        self.note_buffer.clear();
                         let book = self.books.remove(index);
+                        self.discard_extracted(&book.path);
                         self.saved.paths.retain(|p| *p != book.path);
                         self.saved.positions.remove(&book.path);
                         self.saved.bookmarks.remove(&book.path);
@@ -940,9 +1151,21 @@ impl eframe::App for Desktop {
                 for &image_index in &chapter.images {
                     let key = texture_key(&book.path, image_index);
                     if !self.textures.contains_key(&key) {
-                        if let Ok(decoded) =
-                            image::load_from_memory(&book.images[image_index].bytes)
-                        {
+                        // Bound decoded dimensions and allocation against decode bombs.
+                        let mut limits = image::Limits::default();
+                        limits.max_image_width = Some(8192);
+                        limits.max_image_height = Some(8192);
+                        limits.max_alloc = Some(256 * 1024 * 1024);
+                        let decoded = image::ImageReader::new(std::io::Cursor::new(
+                            &book.images[image_index].bytes,
+                        ))
+                        .with_guessed_format()
+                        .map_err(image::ImageError::IoError)
+                        .and_then(|mut reader| {
+                            reader.limits(limits);
+                            reader.decode()
+                        });
+                        if let Ok(decoded) = decoded {
                             let rgba = decoded.to_rgba8();
                             let size = [rgba.width() as usize, rgba.height() as usize];
                             let color = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
@@ -1014,7 +1237,7 @@ impl eframe::App for Desktop {
                 self.chapter = chapter;
             }
             if open_layout {
-                self.open_full_layout();
+                self.open_full_layout(ctx);
             }
             if toggle_bookmark {
                 if let Some(index) = self.selected {

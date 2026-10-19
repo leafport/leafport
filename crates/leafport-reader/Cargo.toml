@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 wry = "0.52"
 tao = "0.35"
+url = "2.5"

@@ -2692,6 +2692,7 @@ name = "leafport-reader"
 version = "0.1.0-dev"
 dependencies = [
  "tao",
+ "url",
  "wry",
 ]
 
