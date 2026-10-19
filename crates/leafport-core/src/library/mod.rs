@@ -1,6 +1,8 @@
 //! UI-free per-title books library.
 
+pub mod acsm;
 pub mod metadata;
+pub mod naming;
 pub mod paths;
 pub mod settings;
 
@@ -9,7 +11,9 @@ use std::fmt;
 use crate::cloud::CloudError;
 use crate::fulfillment::{AcsmError, FulfillError};
 
+pub use acsm::{AcsmSummary, Format, acsm_summary, src_title};
 pub use metadata::{Loan, METADATA_FILE, Metadata, Source, now_rfc3339};
+pub use naming::{clash_suffix, folder_name};
 pub use settings::{Settings, Theme};
 
 #[derive(Debug)]

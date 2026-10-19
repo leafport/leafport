@@ -2674,6 +2674,7 @@ dependencies = [
  "lopdf",
  "md-5",
  "p12",
+ "percent-encoding",
  "rand 0.8.8",
  "rc4",
  "reqwest",

@@ -12,6 +12,7 @@ keyring = { version = "3", optional = true, default-features = false, features =
 roxmltree.workspace = true
 reqwest.workspace = true
 sha1 = "0.10.6"
+percent-encoding = "2"
 rsa = "0.9.8"
 rand = "0.8.5"
 base64 = "0.22.1"
