@@ -51,18 +51,7 @@ pub struct CloudClient {
 
 impl CloudClient {
     pub fn new(base: &str) -> Result<Self, CloudError> {
-        let mut base = reqwest::Url::parse(base).map_err(|_| CloudError::Endpoint)?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-        {
-            return Err(CloudError::Endpoint);
-        }
-        let path = format!("{}/", base.path().trim_end_matches('/'));
-        base.set_path(&path);
+        let base = endpoint(base)?;
         Ok(Self {
             service: crate::service::ServiceClient::new().map_err(CloudError::Transport)?,
             base,
@@ -78,43 +67,120 @@ impl CloudClient {
     ) -> Result<Vec<DownloadRecord>, CloudError> {
         let request =
             download_request(user, from_date, to_date, key).map_err(CloudError::Signing)?;
-        self.exchange(DOWNLOAD_OPERATION, request, download_records)
+        exchange(
+            &self.service,
+            &self.base,
+            DOWNLOAD_OPERATION,
+            request,
+            download_records,
+        )
     }
 
     pub fn upload(&self, user: &str, acsm: &[u8], key: &RsaPrivateKey) -> Result<(), CloudError> {
         let request = upload_request(user, acsm, key).map_err(CloudError::Signing)?;
-        self.exchange(UPLOAD_OPERATION, request, acknowledge_upload)
+        exchange(
+            &self.service,
+            &self.base,
+            UPLOAD_OPERATION,
+            request,
+            acknowledge_upload,
+        )
     }
+}
 
-    fn exchange<T>(
-        &self,
-        operation: &str,
-        request: String,
-        parse: impl FnOnce(&str) -> Result<T, CloudResponseError>,
-    ) -> Result<T, CloudError> {
-        let url = self
-            .base
-            .join(operation)
-            .map_err(|_| CloudError::Endpoint)?;
-        let response = self
-            .service
-            .post_adept(url.as_str(), request)
-            .map_err(CloudError::Transport)?;
-        if !response.status.is_success() {
-            // Preserve semantic ADEPT errors when available, otherwise retain bytes.
-            if let Ok(xml) = std::str::from_utf8(&response.body) {
-                if let Err(error @ CloudResponseError::Service { .. }) = parse(xml) {
-                    return Err(CloudError::Response(error));
-                }
-            }
-            return Err(CloudError::Http {
-                status: response.status,
-                body: response.body,
-            });
-        }
-        let xml = String::from_utf8(response.body).map_err(CloudError::Utf8)?;
-        parse(&xml).map_err(CloudError::Response)
+/// Validate a cloud base URL and normalise its path to end in `/`.
+fn endpoint(base: &str) -> Result<reqwest::Url, CloudError> {
+    let mut base = reqwest::Url::parse(base).map_err(|_| CloudError::Endpoint)?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(CloudError::Endpoint);
     }
+    let path = format!("{}/", base.path().trim_end_matches('/'));
+    base.set_path(&path);
+    Ok(base)
+}
+
+fn exchange<T>(
+    transport: &dyn crate::service::Transport,
+    base: &reqwest::Url,
+    operation: &str,
+    request: String,
+    parse: impl FnOnce(&str) -> Result<T, CloudResponseError>,
+) -> Result<T, CloudError> {
+    let url = base.join(operation).map_err(|_| CloudError::Endpoint)?;
+    let response = transport
+        .post_adept(url.as_str(), request)
+        .map_err(CloudError::Transport)?;
+    if !response.status.is_success() {
+        // Preserve semantic ADEPT errors when available, otherwise retain bytes.
+        if let Ok(xml) = std::str::from_utf8(&response.body) {
+            if let Err(error @ CloudResponseError::Service { .. }) = parse(xml) {
+                return Err(CloudError::Response(error));
+            }
+        }
+        return Err(CloudError::Http {
+            status: response.status,
+            body: response.body,
+        });
+    }
+    let xml = String::from_utf8(response.body).map_err(CloudError::Utf8)?;
+    parse(&xml).map_err(CloudError::Response)
+}
+
+/// Raw SyncToDevice response plus its decoded records, so callers can cache the XML.
+#[derive(Clone, Debug)]
+pub struct SyncToDeviceResponse {
+    pub xml: String,
+    pub records: Vec<DownloadRecord>,
+}
+
+/// SyncToDevice without date bounds, over any transport.
+pub fn sync_to_device(
+    transport: &dyn crate::service::Transport,
+    base: &str,
+    user: &str,
+    key: &RsaPrivateKey,
+) -> Result<SyncToDeviceResponse, CloudError> {
+    let base = endpoint(base)?;
+    let request = download_request(user, None, None, key).map_err(CloudError::Signing)?;
+    let xml = exchange(transport, &base, DOWNLOAD_OPERATION, request, |xml| {
+        download_records(xml).map(|records| (xml.to_owned(), records))
+    })?;
+    Ok(SyncToDeviceResponse {
+        xml: xml.0,
+        records: xml.1,
+    })
+}
+
+/// SyncToCloud over any transport; Ok only on the explicit SUCCESS acknowledgment.
+pub fn sync_to_cloud(
+    transport: &dyn crate::service::Transport,
+    base: &str,
+    user: &str,
+    acsm: &[u8],
+    key: &RsaPrivateKey,
+) -> Result<(), CloudError> {
+    let base = endpoint(base)?;
+    let request = upload_request(user, acsm, key).map_err(CloudError::Signing)?;
+    exchange(
+        transport,
+        &base,
+        UPLOAD_OPERATION,
+        request,
+        acknowledge_upload,
+    )
+}
+
+/// The `data` attribute of an ADEPT `error` root element.
+pub fn adept_error_data(xml: &str) -> Option<String> {
+    roxmltree::Document::parse(xml)
+        .ok()
+        .and_then(|document| document.root_element().attribute("data").map(str::to_owned))
 }
 
 #[derive(Debug)]
@@ -135,9 +201,7 @@ impl fmt::Display for CloudResponseError {
             Self::Xml(error) => write!(f, "E_ADEPT_XML_SYNTAX: {error}"),
             Self::Service { xml } => {
                 // The ADEPT error root carries its code and context in the `data` attribute.
-                let data = roxmltree::Document::parse(xml).ok().and_then(|document| {
-                    document.root_element().attribute("data").map(str::to_owned)
-                });
+                let data = adept_error_data(xml);
                 match data {
                     Some(data) => write!(f, "cloud service returned an ADEPT error: {data}"),
                     None => write!(f, "cloud service returned an ADEPT error"),
@@ -239,7 +303,9 @@ pub fn acknowledge_upload(xml: &str) -> Result<(), CloudResponseError> {
         .filter(|node| node.is_text())
         .filter_map(|node| node.text())
         .collect();
-    if root.has_tag_name(("http://ns.adobe.com/adept", "synctocloudResult")) && text.trim() == "SUCCESS" {
+    if root.has_tag_name(("http://ns.adobe.com/adept", "synctocloudResult"))
+        && text.trim() == "SUCCESS"
+    {
         Ok(())
     } else {
         Err(CloudResponseError::InvalidResponse)

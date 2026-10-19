@@ -54,6 +54,22 @@ pub struct AdeptResponse {
     pub body: Vec<u8>,
 }
 
+/// Seam over the blocking HTTP calls so protocol flows can run against a fake.
+pub trait Transport: Send + Sync {
+    fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError>;
+    fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError>;
+}
+
+impl Transport for ServiceClient {
+    fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+        ServiceClient::post_adept(self, url, xml)
+    }
+
+    fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        ServiceClient::fetch(self, url, max_bytes)
+    }
+}
+
 impl ServiceClient {
     /// Blocking transport for already constructed ADEPT request XML.
     /// No automatic retry: fulfillment may consume a single-use token.
@@ -110,7 +126,10 @@ impl ServiceClient {
                 } else if !matches!(attempt.url().scheme(), "http" | "https") {
                     attempt.error("redirect to non-http(s) scheme")
                 } else if attempt.url().scheme() == "http"
-                    && attempt.previous().last().is_some_and(|p| p.scheme() == "https")
+                    && attempt
+                        .previous()
+                        .last()
+                        .is_some_and(|p| p.scheme() == "https")
                 {
                     attempt.error("https to http redirect downgrade")
                 } else {

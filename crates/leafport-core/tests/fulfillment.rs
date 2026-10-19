@@ -3,7 +3,7 @@ mod common;
 use leafport_core::fulfillment::{
     Acsm, AcsmError, ActivationToken, DeviceDescriptor, DeviceRole, FulfillResponseError,
     MAX_ACSM_BYTES, fulfill_url, loan_return_request, loan_return_url, parse_fulfillment,
-    require_web_url,
+    perform_fulfillment, require_web_url,
 };
 
 fn acsm_with_operator(url: &str) -> String {
@@ -44,7 +44,10 @@ fn acsm_accepts_plain_http_operator_url() {
         "http://play.google.com/books/volumes/x/acsm",
     ))
     .unwrap();
-    assert_eq!(acsm.operator_url(), "http://play.google.com/books/volumes/x/acsm");
+    assert_eq!(
+        acsm.operator_url(),
+        "http://play.google.com/books/volumes/x/acsm"
+    );
 }
 
 const ACSM: &str = r#"<?xml version="1.0"?>
@@ -209,7 +212,10 @@ fn fulfillment_response_extracts_download_and_license() {
         .descendants()
         .find(|node| node.tag_name().name() == "encryptedKey")
         .unwrap();
-    assert_eq!(key.tag_name().namespace(), Some("http://ns.adobe.com/adept"));
+    assert_eq!(
+        key.tag_name().namespace(),
+        Some("http://ns.adobe.com/adept")
+    );
     assert!(result.loan_token_xml.is_none());
 }
 
@@ -265,4 +271,56 @@ fn loan_return_request_is_signed_in_field_order() {
         r#"<loanReturn xmlns="http://ns.adobe.com/adept"><user>u</user><device>d</device><loanToken>L</loanToken><signature"#
     ));
     common::verify_signed(&request, common::key());
+}
+
+#[test]
+fn fulfillment_response_exposes_title_author_id_and_loan_expiry() {
+    let xml = r#"<fulfillmentResult xmlns="http://ns.adobe.com/adept" xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <fulfillment>F-1</fulfillment>
+      <resourceItemInfo><resource>urn:uuid:book</resource>
+        <metadata><dc:title>White Sand</dc:title><dc:creator>Brandon Sanderson</dc:creator></metadata>
+        <src>https://dl.example/book.epub</src>
+        <licenseToken><permissions>
+          <display><until>2026-11-09T00:00:00Z</until></display>
+          <play><until>2026-11-02T00:00:00Z</until></play>
+        </permissions></licenseToken>
+      </resourceItemInfo></fulfillmentResult>"#;
+    let f = parse_fulfillment(xml).unwrap();
+    assert_eq!(f.fulfillment_id.as_deref(), Some("F-1"));
+    assert_eq!(f.title.as_deref(), Some("White Sand"));
+    assert_eq!(f.author.as_deref(), Some("Brandon Sanderson"));
+    assert_eq!(f.loan_expires.as_deref(), Some("2026-11-02T00:00:00Z"));
+}
+
+#[test]
+fn fulfillment_service_error_display_carries_data() {
+    let err = parse_fulfillment(
+        r#"<error xmlns="http://ns.adobe.com/adept" data="E_GOOGLE_DEVICE_LIMIT_REACHED http://x"/>"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "E_ADEPT_FULFILL: E_GOOGLE_DEVICE_LIMIT_REACHED http://x"
+    );
+}
+
+#[test]
+fn perform_fulfillment_runs_over_a_fake_transport() {
+    let acsm = Acsm::parse(acsm_with_operator("https://op.example/fulfillment")).unwrap();
+    let ok = r#"<fulfillmentResult xmlns="http://ns.adobe.com/adept"><resourceItemInfo><resource>urn:uuid:b</resource><src>https://dl.example/b.epub</src></resourceItemInfo></fulfillmentResult>"#;
+    let transport = common::FakeTransport::new()
+        .respond("/fulfillment/Fulfill", 200, ok)
+        .respond("/b.epub", 200, b"BOOK".to_vec());
+    let book = perform_fulfillment(
+        &transport,
+        &acsm,
+        "u",
+        "d",
+        "standalone",
+        &[],
+        common::key(),
+    )
+    .unwrap();
+    assert_eq!(book.body, b"BOOK");
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
 }

@@ -5,6 +5,7 @@
 use std::{error::Error, fmt};
 
 const ADEPT: &str = "http://ns.adobe.com/adept";
+const DC: &str = "http://purl.org/dc/elements/1.1/";
 
 /// Device role in a fulfill request.
 #[derive(Clone, Copy, Debug)]
@@ -285,6 +286,14 @@ pub const MAX_BOOK_BYTES: usize = 512 * 1024 * 1024;
 /// src/href, licenseToken, downloadType).
 #[derive(Clone, Debug)]
 pub struct Fulfillment {
+    /// Text of the ADEPT `fulfillment` element.
+    pub fulfillment_id: Option<String>,
+    /// `dc:title` of the fulfilled item.
+    pub title: Option<String>,
+    /// `dc:creator` of the fulfilled item.
+    pub author: Option<String>,
+    /// Smallest `until` under the licenseToken permissions, compared as strings.
+    pub loan_expires: Option<String>,
     /// Resource identifier of the fulfilled item.
     pub resource: Option<String>,
     /// URL to download the protected publication from.
@@ -317,8 +326,7 @@ pub fn standalone_element(xml: &str, node: roxmltree::Node) -> String {
             break;
         }
         let start = index;
-        while index < bytes.len() && bytes[index] != b'=' && !bytes[index].is_ascii_whitespace()
-        {
+        while index < bytes.len() && bytes[index] != b'=' && !bytes[index].is_ascii_whitespace() {
             index += 1;
         }
         let name = &slice[start..index];
@@ -386,7 +394,10 @@ impl fmt::Display for FulfillResponseError {
         match self {
             Self::TooLarge => write!(f, "fulfillment response exceeds the local size limit"),
             Self::Xml(error) => write!(f, "E_ADEPT_XML_SYNTAX: {error}"),
-            Self::Service { .. } => write!(f, "E_ADEPT_FULFILL: service returned an ADEPT error"),
+            Self::Service { xml } => match crate::cloud::adept_error_data(xml) {
+                Some(data) => write!(f, "E_ADEPT_FULFILL: {data}"),
+                None => write!(f, "E_ADEPT_FULFILL: service returned an ADEPT error"),
+            },
             Self::MissingDownload => write!(f, "E_ADEPT_NO_DOWNLOAD: no download URL in response"),
         }
     }
@@ -437,7 +448,29 @@ pub fn parse_fulfillment(xml: &str) -> Result<Fulfillment, FulfillResponseError>
     let resource = find("resource").map(text).filter(|v| !v.is_empty());
     let license_token_xml = find("licenseToken").map(|node| standalone_element(xml, node));
     let loan_token_xml = find("loanToken").map(|node| standalone_element(xml, node));
+    let dc = |name: &str| {
+        document
+            .descendants()
+            .find(|node| node.has_tag_name((DC, name)))
+            .map(text)
+            .filter(|v| !v.is_empty())
+    };
+    let loan_expires = find("licenseToken").and_then(|token| {
+        token
+            .descendants()
+            .find(|node| node.has_tag_name((ADEPT, "permissions")))
+            .into_iter()
+            .flat_map(|permissions| permissions.descendants())
+            .filter(|node| node.has_tag_name((ADEPT, "until")))
+            .map(text)
+            .filter(|v| !v.is_empty())
+            .min()
+    });
     Ok(Fulfillment {
+        fulfillment_id: find("fulfillment").map(text).filter(|v| !v.is_empty()),
+        title: dc("title"),
+        author: dc("creator"),
+        loan_expires,
         resource,
         download_url,
         download_type,
@@ -493,7 +526,7 @@ pub struct FulfilledBook {
 /// not retried on transport failure.
 #[allow(clippy::too_many_arguments)]
 pub fn perform_fulfillment(
-    client: &crate::service::ServiceClient,
+    client: &dyn crate::service::Transport,
     acsm: &Acsm,
     user: &str,
     device: &str,
@@ -591,7 +624,7 @@ fn check_not_error(xml: &str) -> Result<(), FulfillResponseError> {
 /// non-error 2xx response is acceptance; an ADEPT `error` root (even with 2xx) is
 /// retained and returned.
 pub fn perform_loan_return(
-    client: &crate::service::ServiceClient,
+    client: &dyn crate::service::Transport,
     operator_url: &str,
     user: &str,
     device: &str,

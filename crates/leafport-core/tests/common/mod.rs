@@ -2,7 +2,12 @@
 
 #![allow(dead_code)]
 
-use std::sync::OnceLock;
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, OnceLock},
+};
+
+use leafport_core::service::{AdeptResponse, ServiceError, Transport};
 
 use leafport_core::rsa::RsaPrivateKey;
 
@@ -43,4 +48,60 @@ pub fn aes_encrypt(key: &[u8; 16], iv: &[u8; 16], plain: &[u8], pad: bool) -> Ve
     let mut out = iv.to_vec();
     out.extend_from_slice(&ciphertext);
     out
+}
+
+/// Scripted transport: responses are consumed in order by `post_adept` and `fetch`.
+pub struct FakeTransport {
+    queue: Mutex<VecDeque<(String, u16, Vec<u8>)>>,
+    /// Recorded `(url, body)` pairs; `fetch` records an empty body.
+    pub requests: Mutex<Vec<(String, String)>>,
+}
+
+impl FakeTransport {
+    pub fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn respond(self, url_suffix: &str, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.queue
+            .lock()
+            .unwrap()
+            .push_back((url_suffix.to_owned(), status, body.into()));
+        self
+    }
+
+    fn next(&self, url: &str, body: String) -> AdeptResponse {
+        self.requests.lock().unwrap().push((url.to_owned(), body));
+        let (suffix, status, body) = self
+            .queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("unexpected request to {url}: queue empty"));
+        assert!(
+            url.ends_with(&suffix),
+            "request {url} does not end with {suffix}"
+        );
+        AdeptResponse {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body,
+        }
+    }
+}
+
+impl Transport for FakeTransport {
+    fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+        Ok(self.next(url, xml))
+    }
+
+    fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        let response = self.next(url, String::new());
+        if response.body.len() > max_bytes {
+            return Err(ServiceError::ResponseTooLarge);
+        }
+        Ok(response)
+    }
 }

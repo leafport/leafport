@@ -1,8 +1,8 @@
 mod common;
 
 use leafport_core::cloud::{
-    CloudClient, CloudError, CloudResponseError, acknowledge_upload, download_records,
-    download_request, upload_request,
+    CloudClient, CloudError, CloudResponseError, PRODUCTION_BASE, acknowledge_upload,
+    download_records, download_request, sync_to_cloud, sync_to_device, upload_request,
 };
 use leafport_core::signing::RequestSigningError;
 
@@ -97,4 +97,35 @@ fn cloud_client_accepts_only_plain_http_bases() {
             "{base}"
         );
     }
+}
+
+#[test]
+fn sync_to_device_returns_raw_xml_and_records() {
+    let body = r#"<synctodeviceResult xmlns="http://ns.adobe.com/adept"><user2acsm><user>a</user><acsm>PGFjc20vPg==</acsm></user2acsm></synctodeviceResult>"#;
+    let transport = common::FakeTransport::new().respond("/ebookcloud/SyncToDevice", 200, body);
+    let response =
+        sync_to_device(&transport, PRODUCTION_BASE, "urn:uuid:u", common::key()).unwrap();
+    assert_eq!(response.xml, body);
+    assert_eq!(response.records.len(), 1);
+}
+
+#[test]
+fn sync_to_cloud_requires_success_ack() {
+    let ok = common::FakeTransport::new().respond(
+        "/SyncToCloud",
+        200,
+        r#"<synctocloudResult xmlns="http://ns.adobe.com/adept">SUCCESS</synctocloudResult>"#,
+    );
+    assert!(sync_to_cloud(&ok, PRODUCTION_BASE, "u", b"<acsm/>", common::key()).is_ok());
+    let bad = common::FakeTransport::new().respond(
+        "/SyncToCloud",
+        500,
+        r#"<error xmlns="http://ns.adobe.com/adept" data="E_X"/>"#,
+    );
+    assert!(
+        sync_to_cloud(&bad, PRODUCTION_BASE, "u", b"<acsm/>", common::key())
+            .unwrap_err()
+            .to_string()
+            .contains("E_X")
+    );
 }
