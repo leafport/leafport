@@ -22,7 +22,11 @@ fn is_reserved(name: &str) -> bool {
 
 /// Turns a title into a folder name that is valid on every platform.
 pub fn folder_name(title: &str) -> String {
-    let filtered: String = title.chars().filter(|c| !is_dropped(*c)).collect();
+    let filtered: String = title
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !is_dropped(*c))
+        .collect();
     let collapsed = filtered.split_whitespace().collect::<Vec<_>>().join(" ");
     let is_edge = |c: char| c == '.' || c == ' ';
     let mut name = collapsed
@@ -41,7 +45,8 @@ pub fn folder_name(title: &str) -> String {
         return "Untitled".to_owned();
     }
     if is_reserved(&name) {
-        name.push('_');
+        let stem_len = name.find('.').unwrap_or(name.len());
+        name.insert(stem_len, '_');
     }
     name
 }

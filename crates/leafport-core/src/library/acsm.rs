@@ -108,9 +108,10 @@ pub fn acsm_summary(bytes: &[u8]) -> Result<AcsmSummary, LibraryError> {
         .descendants()
         .find(|n| n.has_tag_name((ADEPT, "metadata")))
         .unwrap_or(root);
-    let title = find_text(meta, DC, "title");
-    let author = find_text(meta, DC, "creator");
+    let title = find_text(meta, DC, "title").or_else(|| find_text(root, DC, "title"));
+    let author = find_text(meta, DC, "creator").or_else(|| find_text(root, DC, "creator"));
     let format = find_text(meta, DC, "format")
+        .or_else(|| find_text(root, DC, "format"))
         .map(|m| Format::from_mime(&m))
         .unwrap_or(Format::Unknown);
     let key = match &resource {

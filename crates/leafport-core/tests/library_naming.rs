@@ -24,9 +24,11 @@ fn folder_name_keeps_unicode_scripts() {
 
 #[test]
 fn folder_name_handles_hostile_titles() {
+    assert_eq!(folder_name("A\tB"), "A B");
+    assert_eq!(folder_name("Line1\nLine2"), "Line1 Line2");
     assert_eq!(folder_name("???"), "Untitled");
     assert_eq!(folder_name("con"), "con_");
-    assert_eq!(folder_name("COM3.txt"), "COM3.txt_");
+    assert_eq!(folder_name("COM3.txt"), "COM3_.txt");
     assert_eq!(folder_name("Com10"), "Com10");
     assert_eq!(folder_name(".hack//Sign"), "hackSign");
     assert_eq!(folder_name("Ends with dot."), "Ends with dot");
@@ -92,4 +94,12 @@ fn src_title_is_url_decoded_including_cyrillic() {
         src_title("https://x/%D0%9C%D0%B0%D1%81%D1%82%D0%B5%D1%80.pdf").as_deref(),
         Some("Мастер")
     );
+}
+
+#[test]
+fn acsm_summary_falls_back_to_document_wide_dc_lookup() {
+    let xml = r#"<fulfillmentToken xmlns="http://ns.adobe.com/adept" xmlns:dc="http://purl.org/dc/elements/1.1/"><resourceItemInfo><metadata><dc:creator>Au</dc:creator></metadata><dc:title>Elsewhere</dc:title></resourceItemInfo></fulfillmentToken>"#;
+    let s = acsm_summary(xml.as_bytes()).unwrap();
+    assert_eq!(s.title.as_deref(), Some("Elsewhere"));
+    assert_eq!(s.author.as_deref(), Some("Au"));
 }
