@@ -45,10 +45,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("certificate\t{}", info.certificate.as_deref().unwrap_or(""));
         // Report whether the discovery certificate yields a usable sign-in key.
         match info.certificate.as_deref() {
-            Some(certificate) => match leafport_core::activation::service_certificate_key(certificate) {
-                Ok(_) => println!("certificateKey\tRSA public key parsed"),
-                Err(error) => println!("certificateKey\t{error}"),
-            },
+            Some(certificate) => {
+                match leafport_core::activation::service_certificate_key(certificate) {
+                    Ok(_) => println!("certificateKey\tRSA public key parsed"),
+                    Err(error) => println!("certificateKey\t{error}"),
+                }
+            }
             None => println!("certificateKey\t(no certificate in discovery)"),
         }
         for vendor in catalog.entries() {

@@ -103,9 +103,8 @@ pub fn account_auth_key(credentials_xml: &str, device_key: &[u8; 16]) -> Option<
     // the safe contents leniently instead of using `PFX::key_bags`, which rejects it.
     let mut keys = Vec::new();
     if let Some(safe) = pfx.auth_safe.data(&password) {
-        let contents =
-            yasna::parse_ber(&safe, |r| r.collect_sequence_of(p12::ContentInfo::parse))
-                .unwrap_or_default();
+        let contents = yasna::parse_ber(&safe, |r| r.collect_sequence_of(p12::ContentInfo::parse))
+            .unwrap_or_default();
         for content in &contents {
             let Some(data) = content.data(&password) else {
                 continue;

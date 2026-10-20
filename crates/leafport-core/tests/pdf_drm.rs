@@ -2,9 +2,9 @@ mod common;
 
 use std::io::Write;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use leafport_core::pdf_drm::{PdfDrmError, content_key, decrypt_pdf, is_ebx_encrypted};
 use leafport_core::rsa::Pkcs1v15Encrypt;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use lopdf::{
     Dictionary, Document, Object, ObjectId, SaveOptions, Stream, StringFormat, dictionary,
 };

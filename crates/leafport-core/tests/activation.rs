@@ -1,12 +1,12 @@
 mod common;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use leafport_core::activation::{
     ActivationKeys, SignInDataError, SignInResponseError, device_fingerprint, device_id,
     encrypt_sign_in_data, export_private_key, parse_sign_in_response, sign_in_request, sign_in_url,
     wrap_private_key,
 };
 use leafport_core::rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
-use base64::{Engine, engine::general_purpose::STANDARD};
 
 const DEVICE_KEY: [u8; 16] = [
     0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
@@ -115,9 +115,10 @@ fn sign_in_request_carries_keys_in_native_order() {
     );
 
     use leafport_core::rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
-    let public =
-        leafport_core::rsa::RsaPublicKey::from_public_key_der(&STANDARD.decode(children[1].1).unwrap())
-            .unwrap();
+    let public = leafport_core::rsa::RsaPublicKey::from_public_key_der(
+        &STANDARD.decode(children[1].1).unwrap(),
+    )
+    .unwrap();
     assert_eq!(public, keys.authentication.to_public_key());
     let private = unwrap_key(&STANDARD.decode(children[4].1).unwrap());
     assert_eq!(private, export_private_key(&keys.license).unwrap());
@@ -163,9 +164,15 @@ fn account_auth_key_reads_pkcs12_with_base64_device_key() {
     use leafport_core::rsa::pkcs8::EncodePrivateKey;
     let key = common::key();
     let der = key.to_pkcs8_der().unwrap();
-    let pfx = p12::PFX::new(b"cert", der.as_bytes(), None, &STANDARD.encode(DEVICE_KEY), "auth")
-        .unwrap()
-        .to_der();
+    let pfx = p12::PFX::new(
+        b"cert",
+        der.as_bytes(),
+        None,
+        &STANDARD.encode(DEVICE_KEY),
+        "auth",
+    )
+    .unwrap()
+    .to_der();
     let xml = format!(
         r#"<credentials xmlns="http://ns.adobe.com/adept"><user>urn:uuid:me</user><pkcs12>{}</pkcs12></credentials>"#,
         STANDARD.encode(pfx)
@@ -174,5 +181,11 @@ fn account_auth_key_reads_pkcs12_with_base64_device_key() {
     let mut other = DEVICE_KEY;
     other[0] ^= 1;
     assert!(account_auth_key(&xml, &other).is_none());
-    assert!(account_auth_key("<credentials xmlns=\"http://ns.adobe.com/adept\"/>", &DEVICE_KEY).is_none());
+    assert!(
+        account_auth_key(
+            "<credentials xmlns=\"http://ns.adobe.com/adept\"/>",
+            &DEVICE_KEY
+        )
+        .is_none()
+    );
 }

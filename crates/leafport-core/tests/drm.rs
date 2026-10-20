@@ -1,11 +1,11 @@
 mod common;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use leafport_core::drm::{
     DrmError, MAX_RESOURCE_BYTES, content_key, decrypt_resource, encrypted_resources,
     is_adept_encryption,
 };
 use leafport_core::rsa::Pkcs1v15Encrypt;
-use base64::{Engine, engine::general_purpose::STANDARD};
 
 const KEY: [u8; 16] = *b"0123456789abcdef";
 const IV: [u8; 16] = [7; 16];
