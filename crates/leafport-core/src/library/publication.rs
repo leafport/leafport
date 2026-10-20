@@ -300,7 +300,8 @@ fn epub_cover(publication: &[u8]) -> Option<Cover> {
 }
 
 /// The title of a decrypted publication as the book itself declares it: the first
-/// `dc:title` of an EPUB's OPF, or a PDF's XMP `dc:title`, else its Info `/Title`.
+/// `dc:title` of an EPUB's OPF, or a PDF's `/EBX_TITLE` or `/Title`.
+/// PDFs must be the original download: decryption removes `/Encrypt`.
 /// Any failure, or an empty title, yields `None`.
 pub fn book_title(publication: &[u8], format: Format) -> Option<String> {
     let raw = match format {
@@ -326,61 +327,40 @@ fn epub_title(publication: &[u8]) -> Option<String> {
 }
 
 const DC: &str = "http://purl.org/dc/elements/1.1/";
-const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
-const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
-const MAX_XMP_BYTES: usize = 16 * 1024 * 1024;
 
+/// The title comes from one dictionary chosen by the security handler: the trailer
+/// `/Encrypt` dictionary for non-Standard (Adobe EBX) DRM, else the `/Info` dictionary.
+/// `/EBX_TITLE` wins over `/Title`. XMP is never consulted. Needs the original bytes:
+/// decrypting drops `/Encrypt`.
 fn pdf_title(publication: &[u8]) -> Option<String> {
     let document = lopdf::Document::load_mem(publication).ok()?;
-    pdf_xmp_title(&document)
-        .filter(|title| !title.trim().is_empty())
-        .or_else(|| pdf_info_title(&document))
-}
-
-fn pdf_xmp_title(document: &lopdf::Document) -> Option<String> {
-    let catalog = document.catalog().ok()?;
-    let stream = document
-        .dereference(catalog.get(b"Metadata").ok()?)
-        .ok()?
-        .1
-        .as_stream()
-        .ok()?;
-    let bytes = stream
-        .decompressed_content()
-        .unwrap_or_else(|_| stream.content.clone());
-    if bytes.len() > MAX_XMP_BYTES {
-        return None;
-    }
-    let text = String::from_utf8(bytes).ok()?;
-    let xmp = parse_xml(&text)?;
-    let title = xmp
-        .descendants()
-        .find(|node| node.has_tag_name((DC, "title")))?;
-    let items: Vec<_> = title
-        .descendants()
-        .filter(|node| node.has_tag_name((RDF, "li")))
-        .collect();
-    let item = items
-        .iter()
-        .find(|node| node.attribute((XML_NS, "lang")) == Some("x-default"))
-        .or_else(|| items.first());
-    match item {
-        Some(item) => Some(item.text()?.to_owned()),
-        None => title.text().map(str::to_owned),
-    }
-}
-
-fn pdf_info_title(document: &lopdf::Document) -> Option<String> {
-    let info = document
-        .dereference(document.trailer.get(b"Info").ok()?)
-        .ok()?
-        .1
-        .as_dict()
-        .ok()?;
-    match document.dereference(info.get(b"Title").ok()?).ok()?.1 {
-        lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
-        _ => None,
-    }
+    let trailer = &document.trailer;
+    let is_ebx = |dict: &lopdf::Dictionary| {
+        dict.get(b"Filter")
+            .ok()
+            .and_then(|f| f.as_name().ok())
+            .is_some_and(|name| name != b"Standard")
+    };
+    let dict = match trailer
+        .get(b"Encrypt")
+        .ok()
+        .and_then(|e| document.dereference(e).ok())
+        .and_then(|(_, e)| e.as_dict().ok())
+    {
+        Some(encrypt) if is_ebx(encrypt) => encrypt,
+        _ => document
+            .dereference(trailer.get(b"Info").ok()?)
+            .ok()?
+            .1
+            .as_dict()
+            .ok()?,
+    };
+    ["EBX_TITLE", "Title"].into_iter().find_map(|key| {
+        match document.dereference(dict.get(key.as_bytes()).ok()?).ok()?.1 {
+            lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
+            _ => None,
+        }
+    })
 }
 
 /// A PDF text string: UTF-16 with a BOM, UTF-8 with a BOM, else Latin-1 (PDFDocEncoding).

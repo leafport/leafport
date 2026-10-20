@@ -156,14 +156,15 @@ impl Library {
             },
             format => format,
         };
-        // The decrypted book's own title wins.
+        // The book's own title wins. Read from the original download: a
+        // decrypted PDF has lost the /Encrypt dictionary that can carry the title.
         let publication = decrypt_publication(
             &body,
             format,
             f.license_token_xml.as_deref(),
             &activation.keys.license,
         )?;
-        let title = book_title(&publication, format)
+        let title = book_title(&body, format)
             .or_else(|| f.title.clone())
             .or_else(|| summary.title.clone())
             .or_else(|| summary.src.as_deref().and_then(src_title))

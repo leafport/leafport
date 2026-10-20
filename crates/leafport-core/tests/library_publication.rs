@@ -262,22 +262,30 @@ fn book_title_takes_first_epub_dc_title() {
     );
 }
 
-fn pdf_with(info_title: Option<Vec<u8>>, xmp_title: Option<&str>) -> Vec<u8> {
-    use lopdf::{Document, Object, Stream, StringFormat, dictionary};
+fn pdf_with(info: &[(&str, Vec<u8>)], encrypt: Option<&[(&str, Vec<u8>)]>, xmp: bool) -> Vec<u8> {
+    use lopdf::{Dictionary, Document, Object, Stream, StringFormat, dictionary};
+    let strings = |entries: &[(&str, Vec<u8>)]| {
+        let mut dict = Dictionary::new();
+        for (key, value) in entries {
+            dict.set(*key, Object::String(value.clone(), StringFormat::Literal));
+        }
+        dict
+    };
     let mut document = Document::load_mem(&one_page_pdf()).unwrap();
-    if let Some(bytes) = info_title {
-        let info = document.add_object(dictionary! {
-            "Title" => Object::String(bytes, StringFormat::Literal),
-        });
-        document.trailer.set("Info", info);
+    if !info.is_empty() {
+        let id = document.add_object(strings(info));
+        document.trailer.set("Info", id);
     }
-    if let Some(title) = xmp_title {
-        let xmp = format!(
-            r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="de">Anderer</rdf:li><rdf:li xml:lang="x-default">{title}</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
-        );
+    if let Some(entries) = encrypt {
+        let mut dict = strings(entries);
+        dict.set("Filter", Object::Name(b"EBX_HANDLER".to_vec()));
+        document.trailer.set("Encrypt", Object::Dictionary(dict));
+    }
+    if xmp {
+        let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="x-default">XMP Title</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta>"#;
         let stream = document.add_object(Stream::new(
             dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
-            xmp.into_bytes(),
+            xmp.as_bytes().to_vec(),
         ));
         let root = document
             .trailer
@@ -297,13 +305,21 @@ fn pdf_with(info_title: Option<Vec<u8>>, xmp_title: Option<&str>) -> Vec<u8> {
     out
 }
 
+fn t(s: &str) -> Vec<u8> {
+    s.as_bytes().to_vec()
+}
+
 #[test]
-fn book_title_reads_pdf_xmp_then_info() {
-    let both = pdf_with(Some(b"Info Title".to_vec()), Some("XMP Title"));
-    assert_eq!(book_title(&both, Format::Pdf).as_deref(), Some("XMP Title"));
-    let info_only = pdf_with(Some(b"Info Title".to_vec()), None);
+fn book_title_reads_pdf_info_ebx_title_then_title() {
+    let both = pdf_with(
+        &[("EBX_TITLE", t("Ebx Title")), ("Title", t("Info Title"))],
+        None,
+        false,
+    );
+    assert_eq!(book_title(&both, Format::Pdf).as_deref(), Some("Ebx Title"));
+    let plain = pdf_with(&[("Title", t("Info Title"))], None, false);
     assert_eq!(
-        book_title(&info_only, Format::Pdf).as_deref(),
+        book_title(&plain, Format::Pdf).as_deref(),
         Some("Info Title")
     );
     let mut utf16 = vec![0xFE, 0xFF];
@@ -311,13 +327,34 @@ fn book_title_reads_pdf_xmp_then_info() {
         utf16.extend(unit.to_be_bytes());
     }
     assert_eq!(
-        book_title(&pdf_with(Some(utf16), None), Format::Pdf).as_deref(),
+        book_title(&pdf_with(&[("Title", utf16)], None, false), Format::Pdf).as_deref(),
         Some("Мир")
     );
     assert_eq!(
-        book_title(&pdf_with(Some(vec![0xE9, b't', 0xE9]), None), Format::Pdf).as_deref(),
+        book_title(
+            &pdf_with(&[("Title", vec![0xE9, b't', 0xE9])], None, false),
+            Format::Pdf
+        )
+        .as_deref(),
         Some("été")
     );
+}
+
+#[test]
+fn book_title_reads_pdf_encrypt_dict_for_ebx() {
+    let info = [("Title", t("Info Title"))];
+    let ebx = pdf_with(&info, Some(&[("EBX_TITLE", t("Enc Title"))]), false);
+    assert_eq!(book_title(&ebx, Format::Pdf).as_deref(), Some("Enc Title"));
+    let plain = pdf_with(&info, Some(&[("Title", t("Enc Plain"))]), false);
+    assert_eq!(
+        book_title(&plain, Format::Pdf).as_deref(),
+        Some("Enc Plain")
+    );
+}
+
+#[test]
+fn book_title_ignores_pdf_xmp() {
+    assert_eq!(book_title(&pdf_with(&[], None, true), Format::Pdf), None);
 }
 
 #[test]
@@ -326,6 +363,6 @@ fn book_title_none_for_untitled_or_garbage() {
     assert_eq!(book_title(&epub_with_titles(&["  "]), Format::Epub), None);
     assert_eq!(book_title(b"junk", Format::Epub), None);
     assert_eq!(book_title(b"junk", Format::Pdf), None);
-    assert_eq!(book_title(&pdf_with(None, None), Format::Pdf), None);
+    assert_eq!(book_title(&pdf_with(&[], None, false), Format::Pdf), None);
     assert_eq!(book_title(&one_page_pdf(), Format::Unknown), None);
 }
