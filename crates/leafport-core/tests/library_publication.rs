@@ -141,6 +141,26 @@ fn font_obfuscation_entries_survive_decryption() {
 }
 
 #[test]
+fn compressed_adept_chapter_decrypts_to_plaintext() {
+    use std::io::Write;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    deflate.write_all(CHAPTER).unwrap();
+    let chapter = common::aes_encrypt(&KEY, &common::IV, &deflate.finish().unwrap(), true);
+    let data = r#"<enc:EncryptedData>
+        <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        <enc:CipherData><enc:CipherReference URI="OEBPS/ch%31.xhtml"/></enc:CipherData>
+        <enc:EncryptionProperties><enc:EncryptionProperty>
+            <adept:Compression xmlns:adept="http://ns.adobe.com/adept" Method="8" OriginalLength="44"/>
+        </enc:EncryptionProperty></enc:EncryptionProperties>
+    </enc:EncryptedData>"#;
+    let source = common::protected_epub_with(&chapter, &[], &[data]);
+    let out = decrypt_publication(&source, Format::Epub, None, common::key()).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
+    assert_eq!(read(&mut zip, "OEBPS/ch1.xhtml"), CHAPTER);
+    assert!(zip.by_name("META-INF/encryption.xml").is_err());
+}
+
+#[test]
 fn adept_resource_missing_from_archive_is_a_drm_error() {
     let missing = r#"<enc:EncryptedData>
         <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
@@ -362,6 +382,25 @@ fn book_title_reads_pdf_encrypt_dict_for_ebx() {
     assert_eq!(
         book_title(&plain, Format::Pdf).as_deref(),
         Some("Enc Plain")
+    );
+}
+
+#[test]
+fn book_title_reads_indirect_pdf_encrypt_dict_for_ebx() {
+    use lopdf::{Document, Object, StringFormat, dictionary};
+    let mut document =
+        Document::load_mem(&pdf_with(&[("Title", t("Info Title"))], None, false)).unwrap();
+    let encrypt = document.add_object(dictionary! {
+        "Filter" => "EBX_HANDLER",
+        "EBX_TITLE" => Object::String(t("Indirect Title"), StringFormat::Literal),
+    });
+    document.trailer.set("Encrypt", encrypt);
+    let mut ebx = Vec::new();
+    document.save_to(&mut ebx).unwrap();
+    assert!(String::from_utf8_lossy(&ebx).contains(&format!("/Encrypt {} 0 R", encrypt.0)));
+    assert_eq!(
+        book_title(&ebx, Format::Pdf).as_deref(),
+        Some("Indirect Title")
     );
 }
 
