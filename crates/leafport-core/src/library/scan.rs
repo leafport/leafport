@@ -22,13 +22,13 @@ pub struct Library {
 }
 
 impl Library {
-    /// Creates `root` if needed, sweeps leftover `.tmp-*` entries and reads every title folder.
+    /// Creates `root` if needed, sweeps leftover sync temp folders and reads every title folder.
     pub fn open(root: &Path) -> Result<Library, LibraryError> {
         std::fs::create_dir_all(root)?;
         Self::scan(root, true)
     }
 
-    /// Like `open`, but leaves `.tmp-*` entries alone. Callers rescan while a sync may be
+    /// Like `open`, but leaves sync temp folders alone. Callers rescan while a sync may be
     /// running, because its live temp folder must not be deleted.
     pub fn rescan(root: &Path) -> Result<Library, LibraryError> {
         std::fs::create_dir_all(root)?;
@@ -59,14 +59,10 @@ impl Library {
                 }
                 path = target;
                 hidden = false;
-            } else if name.starts_with(".tmp-") {
+            } else if is_temp_name(&name) && path.is_dir() {
                 // Best effort: a stale temp that cannot be removed must not fail the scan.
                 if sweep {
-                    let _ = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
+                    let _ = std::fs::remove_dir_all(&path);
                 }
                 continue;
             }
@@ -81,6 +77,14 @@ impl Library {
             local,
         })
     }
+}
+
+/// Whether `name` is a sync temp folder name: `.tmp-` and 16 lowercase hex digits.
+/// The books folder is user-chosen, so any other `.tmp-` entry is left alone.
+fn is_temp_name(name: &str) -> bool {
+    name.strip_prefix(".tmp-").is_some_and(|hex| {
+        hex.len() == 16 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// The folder name in a `.old-<16 hex>-<name>` entry.

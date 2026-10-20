@@ -201,12 +201,12 @@ fn open_reads_folders_sweeps_tmp_and_flags_malformed_metadata() {
     std::fs::write(root.join("Good/cover.png"), b"x").unwrap();
     std::fs::create_dir_all(root.join("Bad")).unwrap();
     std::fs::write(root.join("Bad/metadata.yaml"), "resource: [").unwrap();
-    std::fs::create_dir_all(root.join(".tmp-x")).unwrap();
+    std::fs::create_dir_all(root.join(".tmp-0123456789abcdef")).unwrap();
     std::fs::create_dir_all(root.join("NoMeta")).unwrap();
     std::fs::write(root.join("stray.txt"), b"x").unwrap();
 
     let lib = Library::open(root).unwrap();
-    assert!(!root.join(".tmp-x").exists());
+    assert!(!root.join(".tmp-0123456789abcdef").exists());
     assert_eq!(lib.local.len(), 2);
     let bad = &lib.local[0];
     let good = &lib.local[1];
@@ -275,10 +275,26 @@ fn rescan_keeps_tmp_entries_and_lists_items() {
     metadata("urn:uuid:g", "Good")
         .write(&root.join("Good"))
         .unwrap();
-    std::fs::create_dir_all(root.join(".tmp-x")).unwrap();
+    std::fs::create_dir_all(root.join(".tmp-0123456789abcdef")).unwrap();
     let lib = Library::rescan(root).unwrap();
-    assert!(root.join(".tmp-x").is_dir());
+    assert!(root.join(".tmp-0123456789abcdef").is_dir());
     assert_eq!(lib.local.len(), 1);
+}
+
+#[test]
+fn open_sweeps_only_sync_temp_folders() {
+    let dir = tempdir();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".tmp-0123456789abcdef")).unwrap();
+    std::fs::write(root.join(".tmp-notes.txt"), b"user notes").unwrap();
+    std::fs::create_dir_all(root.join(".tmp-other")).unwrap();
+    // A file with a sync temp name is not a sync temp folder either.
+    std::fs::write(root.join(".tmp-fedcba9876543210"), b"x").unwrap();
+    Library::open(root).unwrap();
+    assert!(!root.join(".tmp-0123456789abcdef").exists());
+    assert!(root.join(".tmp-notes.txt").is_file());
+    assert!(root.join(".tmp-other").is_dir());
+    assert!(root.join(".tmp-fedcba9876543210").is_file());
 }
 
 const SET_ASIDE: &str = ".old-0123456789abcdef-White Sand";
