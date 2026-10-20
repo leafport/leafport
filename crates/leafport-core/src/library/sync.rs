@@ -5,9 +5,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Format, Item, Library, LibraryError, Loan, Metadata, Source, acsm_summary, decrypt_publication,
-    epub_loan_token, extract_cover, folder_name, full_id_suffix, id_suffix, now_rfc3339, src_title,
-    write_atomic,
+    Format, Item, Library, LibraryError, Loan, Metadata, Source, acsm_summary, book_title,
+    decrypt_publication, epub_loan_token, extract_cover, folder_name, full_id_suffix, id_suffix,
+    now_rfc3339, src_title, write_atomic,
 };
 use crate::cloud::{self, CloudError, DownloadRecord, PRODUCTION_BASE};
 use crate::fulfillment::{
@@ -156,9 +156,15 @@ impl Library {
             },
             format => format,
         };
-        let title = f
-            .title
-            .clone()
+        // The decrypted book's own title wins.
+        let publication = decrypt_publication(
+            &body,
+            format,
+            f.license_token_xml.as_deref(),
+            &activation.keys.license,
+        )?;
+        let title = book_title(&publication, format)
+            .or_else(|| f.title.clone())
             .or_else(|| summary.title.clone())
             .or_else(|| summary.src.as_deref().and_then(src_title))
             .unwrap_or_else(|| summary.key.clone());
@@ -169,12 +175,6 @@ impl Library {
         std::fs::create_dir(&temp)?;
         let write = || -> Result<Metadata, LibraryError> {
             write_atomic(&temp.join(format!("{stem}.acsm")), acsm_bytes)?;
-            let publication = decrypt_publication(
-                &body,
-                format,
-                f.license_token_xml.as_deref(),
-                &activation.keys.license,
-            )?;
             let extension = format.extension().ok_or(LibraryError::UnsupportedFormat)?;
             write_atomic(&temp.join(format!("{stem}.{extension}")), &publication)?;
             if let Some(cover) = extract_cover(&publication, format) {

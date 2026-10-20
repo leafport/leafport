@@ -18,7 +18,7 @@ pub use acsm::{AcsmSummary, Format, acsm_summary, src_title};
 pub use metadata::{Loan, METADATA_FILE, Metadata, Source, now_rfc3339};
 pub use naming::{folder_name, full_id_suffix, id_suffix};
 pub use publication::{
-    Cover, decrypt_publication, epub_loan_token, extract_cover, pdfium_available,
+    Cover, book_title, decrypt_publication, epub_loan_token, extract_cover, pdfium_available,
 };
 pub use scan::{Item, ItemState, Library, LocalItem, merge};
 pub use settings::{Settings, Theme};

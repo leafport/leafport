@@ -256,15 +256,21 @@ pub fn extract_cover(publication: &[u8], format: Format) -> Option<Cover> {
     }
 }
 
-fn epub_cover(publication: &[u8]) -> Option<Cover> {
-    let mut zip = ZipArchive::new(Cursor::new(publication)).ok()?;
-    let container = read_text(&mut zip, "META-INF/container.xml")?;
+/// The OPF path and text of an EPUB, found through `META-INF/container.xml`.
+fn read_opf<R: Read + io::Seek>(zip: &mut ZipArchive<R>) -> Option<(String, String)> {
+    let container = read_text(zip, "META-INF/container.xml")?;
     let opf_path = parse_xml(&container)?
         .descendants()
         .find(|node| node.has_tag_name("rootfile"))?
         .attribute("full-path")?
         .to_owned();
-    let opf = read_text(&mut zip, &opf_path)?;
+    let opf = read_text(zip, &opf_path)?;
+    Some((opf_path, opf))
+}
+
+fn epub_cover(publication: &[u8]) -> Option<Cover> {
+    let mut zip = ZipArchive::new(Cursor::new(publication)).ok()?;
+    let (opf_path, opf) = read_opf(&mut zip)?;
     let document = parse_xml(&opf)?;
     let items: Vec<_> = document
         .descendants()
@@ -291,6 +297,113 @@ fn epub_cover(publication: &[u8]) -> Option<Cover> {
     let path = resolve(&opf_path, item.attribute("href")?)?;
     let bytes = read_limited(zip.by_name(&path).ok()?, MAX_COVER_BYTES)?;
     Some(Cover { extension, bytes })
+}
+
+/// The title of a decrypted publication as the book itself declares it: the first
+/// `dc:title` of an EPUB's OPF, or a PDF's XMP `dc:title`, else its Info `/Title`.
+/// Any failure, or an empty title, yields `None`.
+pub fn book_title(publication: &[u8], format: Format) -> Option<String> {
+    let raw = match format {
+        Format::Epub => epub_title(publication),
+        Format::Pdf => pdf_title(publication),
+        Format::Unknown => None,
+    }?;
+    let title = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+fn epub_title(publication: &[u8]) -> Option<String> {
+    let mut zip = ZipArchive::new(Cursor::new(publication)).ok()?;
+    let (_, opf) = read_opf(&mut zip)?;
+    let document = parse_xml(&opf)?;
+    let metadata = document
+        .descendants()
+        .find(|node| node.has_tag_name("metadata"))?;
+    let title = metadata
+        .descendants()
+        .find(|node| node.has_tag_name((DC, "title")))?;
+    Some(title.text()?.to_owned())
+}
+
+const DC: &str = "http://purl.org/dc/elements/1.1/";
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+const MAX_XMP_BYTES: usize = 16 * 1024 * 1024;
+
+fn pdf_title(publication: &[u8]) -> Option<String> {
+    let document = lopdf::Document::load_mem(publication).ok()?;
+    pdf_xmp_title(&document)
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| pdf_info_title(&document))
+}
+
+fn pdf_xmp_title(document: &lopdf::Document) -> Option<String> {
+    let catalog = document.catalog().ok()?;
+    let stream = document
+        .dereference(catalog.get(b"Metadata").ok()?)
+        .ok()?
+        .1
+        .as_stream()
+        .ok()?;
+    let bytes = stream
+        .decompressed_content()
+        .unwrap_or_else(|_| stream.content.clone());
+    if bytes.len() > MAX_XMP_BYTES {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let xmp = parse_xml(&text)?;
+    let title = xmp
+        .descendants()
+        .find(|node| node.has_tag_name((DC, "title")))?;
+    let items: Vec<_> = title
+        .descendants()
+        .filter(|node| node.has_tag_name((RDF, "li")))
+        .collect();
+    let item = items
+        .iter()
+        .find(|node| node.attribute((XML_NS, "lang")) == Some("x-default"))
+        .or_else(|| items.first());
+    match item {
+        Some(item) => Some(item.text()?.to_owned()),
+        None => title.text().map(str::to_owned),
+    }
+}
+
+fn pdf_info_title(document: &lopdf::Document) -> Option<String> {
+    let info = document
+        .dereference(document.trailer.get(b"Info").ok()?)
+        .ok()?
+        .1
+        .as_dict()
+        .ok()?;
+    match document.dereference(info.get(b"Title").ok()?).ok()?.1 {
+        lopdf::Object::String(bytes, _) => Some(decode_pdf_text(bytes)),
+        _ => None,
+    }
+}
+
+/// A PDF text string: UTF-16 with a BOM, UTF-8 with a BOM, else Latin-1 (PDFDocEncoding).
+fn decode_pdf_text(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units = rest
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]));
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or('\u{FFFD}'))
+            .collect()
+    } else if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units = rest
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or('\u{FFFD}'))
+            .collect()
+    } else if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        String::from_utf8_lossy(rest).into_owned()
+    } else {
+        bytes.iter().map(|&b| b as char).collect()
+    }
 }
 
 /// Resolve a percent-encoded `href` against the directory of `base`. External,

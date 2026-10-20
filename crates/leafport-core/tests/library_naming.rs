@@ -114,6 +114,15 @@ fn src_title_is_url_decoded_including_cyrillic() {
 }
 
 #[test]
+fn src_title_turns_underscores_into_spaces() {
+    assert_eq!(
+        src_title("https://books.google.com/books/download/A_Man_Rides_Through.epub?acsid=x")
+            .as_deref(),
+        Some("A Man Rides Through")
+    );
+}
+
+#[test]
 fn acsm_summary_falls_back_to_document_wide_dc_lookup() {
     let xml = r#"<fulfillmentToken xmlns="http://ns.adobe.com/adept" xmlns:dc="http://purl.org/dc/elements/1.1/"><resourceItemInfo><metadata><dc:creator>Au</dc:creator></metadata><dc:title>Elsewhere</dc:title></resourceItemInfo></fulfillmentToken>"#;
     let s = acsm_summary(xml.as_bytes()).unwrap();

@@ -4,7 +4,8 @@ use std::io::{Cursor, Read};
 
 use common::{ADEPT_DATA, CHAPTER, CONTAINER, KEY, adept_epub, epub, protected_epub};
 use leafport_core::library::{
-    Format, LibraryError, decrypt_publication, epub_loan_token, extract_cover, pdfium_available,
+    Format, LibraryError, book_title, decrypt_publication, epub_loan_token, extract_cover,
+    pdfium_available,
 };
 
 const FONT: &[u8] = b"obfuscated font bytes";
@@ -217,4 +218,114 @@ fn pdf_cover_is_first_page_when_pdfium_loads() {
     } else {
         assert!(cover.is_none());
     }
+}
+
+fn epub_with_titles(titles: &[&str]) -> Vec<u8> {
+    let dc: String = titles
+        .iter()
+        .map(|t| format!("<dc:title>{t}</dc:title>"))
+        .collect();
+    let opf = format!(
+        r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">{dc}</metadata>
+  <manifest><item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#
+    );
+    epub(&[
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", CONTAINER),
+        ("OEBPS/content.opf", opf.as_bytes()),
+        ("OEBPS/ch1.xhtml", CHAPTER),
+    ])
+}
+
+#[test]
+fn book_title_reads_epub_opf_dc_title() {
+    assert_eq!(
+        book_title(&epub_with_titles(&["White Sand"]), Format::Epub).as_deref(),
+        Some("White Sand")
+    );
+    assert_eq!(
+        book_title(&epub_with_titles(&["  White\n   Sand "]), Format::Epub).as_deref(),
+        Some("White Sand")
+    );
+}
+
+#[test]
+fn book_title_takes_first_epub_dc_title() {
+    let book = epub_with_titles(&["A Beautifully Foolish Endeavor", "A Novel"]);
+    assert_eq!(
+        book_title(&book, Format::Epub).as_deref(),
+        Some("A Beautifully Foolish Endeavor")
+    );
+}
+
+fn pdf_with(info_title: Option<Vec<u8>>, xmp_title: Option<&str>) -> Vec<u8> {
+    use lopdf::{Document, Object, Stream, StringFormat, dictionary};
+    let mut document = Document::load_mem(&one_page_pdf()).unwrap();
+    if let Some(bytes) = info_title {
+        let info = document.add_object(dictionary! {
+            "Title" => Object::String(bytes, StringFormat::Literal),
+        });
+        document.trailer.set("Info", info);
+    }
+    if let Some(title) = xmp_title {
+        let xmp = format!(
+            r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title><rdf:Alt><rdf:li xml:lang="de">Anderer</rdf:li><rdf:li xml:lang="x-default">{title}</rdf:li></rdf:Alt></dc:title></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#
+        );
+        let stream = document.add_object(Stream::new(
+            dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+            xmp.into_bytes(),
+        ));
+        let root = document
+            .trailer
+            .get(b"Root")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        document
+            .get_object_mut(root)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Metadata", stream);
+    }
+    let mut out = Vec::new();
+    document.save_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn book_title_reads_pdf_xmp_then_info() {
+    let both = pdf_with(Some(b"Info Title".to_vec()), Some("XMP Title"));
+    assert_eq!(book_title(&both, Format::Pdf).as_deref(), Some("XMP Title"));
+    let info_only = pdf_with(Some(b"Info Title".to_vec()), None);
+    assert_eq!(
+        book_title(&info_only, Format::Pdf).as_deref(),
+        Some("Info Title")
+    );
+    let mut utf16 = vec![0xFE, 0xFF];
+    for unit in "Мир".encode_utf16() {
+        utf16.extend(unit.to_be_bytes());
+    }
+    assert_eq!(
+        book_title(&pdf_with(Some(utf16), None), Format::Pdf).as_deref(),
+        Some("Мир")
+    );
+    assert_eq!(
+        book_title(&pdf_with(Some(vec![0xE9, b't', 0xE9]), None), Format::Pdf).as_deref(),
+        Some("été")
+    );
+}
+
+#[test]
+fn book_title_none_for_untitled_or_garbage() {
+    assert_eq!(book_title(&epub_with_titles(&[]), Format::Epub), None);
+    assert_eq!(book_title(&epub_with_titles(&["  "]), Format::Epub), None);
+    assert_eq!(book_title(b"junk", Format::Epub), None);
+    assert_eq!(book_title(b"junk", Format::Pdf), None);
+    assert_eq!(book_title(&pdf_with(None, None), Format::Pdf), None);
+    assert_eq!(book_title(&one_page_pdf(), Format::Unknown), None);
 }

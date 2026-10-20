@@ -132,7 +132,8 @@ pub fn acsm_summary(bytes: &[u8]) -> Result<AcsmSummary, LibraryError> {
     })
 }
 
-/// File name of a download URL without query, extension or percent-encoding.
+/// File name of a download URL without query, extension or percent-encoding;
+/// underscores become spaces.
 pub fn src_title(src: &str) -> Option<String> {
     let path = src.split(['?', '#']).next().unwrap_or(src);
     let segment = path.rsplit('/').next().unwrap_or(path);
@@ -141,6 +142,7 @@ pub fn src_title(src: &str) -> Option<String> {
         Some((stem, _)) if !stem.is_empty() => stem,
         _ => &decoded,
     };
+    let stem = stem.replace('_', " ");
     let stem = stem.trim();
     (!stem.is_empty()).then(|| stem.to_owned())
 }

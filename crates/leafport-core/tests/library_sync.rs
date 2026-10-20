@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     ADEPT_DATA, FakeTransport, IV, KEY, acsm_xml, activation, adept_epub, aes_encrypt,
-    fulfillment_xml, protected_epub_with,
+    fulfillment_xml, protected_epub, protected_epub_with,
 };
 use leafport_core::cloud::DownloadRecord;
 use leafport_core::library::{
@@ -215,6 +215,41 @@ fn folder_title_comes_from_fulfillment_not_acsm() {
     assert_eq!(out.folder, root.path().join("White Sand [a]"));
     assert!(out.folder.join("White Sand.epub").is_file());
     assert_eq!(out.metadata.title, "White Sand");
+}
+
+#[test]
+fn folder_title_comes_from_book_metadata() {
+    let opf = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Book Title</dc:title></metadata>
+  <manifest/><spine/>
+</package>"#;
+    let book = protected_epub(KEY, &[("OEBPS/content.opf", opf)], &[ADEPT_DATA]);
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let t = FakeTransport::new()
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:a",
+                "Server Title",
+                "https://dl.example/a.epub",
+                None,
+            ),
+        )
+        .respond("/a.epub", 200, book);
+    let out = lib
+        .sync_item(
+            acsm_xml("urn:uuid:a", "ACSM Title").as_bytes(),
+            &activation(),
+            &t,
+        )
+        .unwrap();
+    assert_eq!(out.folder, root.path().join("Book Title [a]"));
+    assert!(out.folder.join("Book Title.epub").is_file());
+    assert!(out.folder.join("Book Title.acsm").is_file());
+    assert_eq!(out.metadata.title, "Book Title");
 }
 
 #[test]
