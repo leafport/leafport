@@ -5,8 +5,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::{
-    Format, Item, Library, LibraryError, Loan, Metadata, Source, acsm_summary, clash_suffix,
-    decrypt_publication, epub_loan_token, extract_cover, folder_name, now_rfc3339, src_title,
+    Format, Item, Library, LibraryError, Loan, Metadata, Source, acsm_summary, decrypt_publication,
+    epub_loan_token, extract_cover, folder_name, full_id_suffix, id_suffix, now_rfc3339, src_title,
     write_atomic,
 };
 use crate::cloud::{self, CloudError, DownloadRecord, PRODUCTION_BASE};
@@ -96,6 +96,38 @@ impl Library {
         Ok(outcome)
     }
 
+    /// The folder for `key`: a scanned folder holding it, else `<stem> [<id>]`, else
+    /// `<stem> [<full id>]` when the short name holds another resource.
+    fn title_folder(&self, stem: &str, key: &str) -> Result<PathBuf, LibraryError> {
+        let scanned = self
+            .local
+            .iter()
+            .find(|l| l.metadata.as_ref().is_some_and(|m| m.resource == key));
+        if let Some(local) = scanned {
+            return Ok(local.folder.clone());
+        }
+        // Folders on disk are checked too, since `local` may predate an earlier sync.
+        let holds_key = |folder: &Path| {
+            !folder.exists() || Metadata::read(folder).is_ok_and(|m| m.resource == key)
+        };
+        for suffix in [id_suffix(key), full_id_suffix(key)] {
+            let folder = self.root.join(format!("{stem}{suffix}"));
+            if holds_key(&folder) {
+                return Ok(folder);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "folder {} belongs to another title",
+                self.root
+                    .join(format!("{stem}{}", full_id_suffix(key)))
+                    .display()
+            ),
+        )
+        .into())
+    }
+
     fn sync_with_source(
         &self,
         acsm_bytes: &[u8],
@@ -131,22 +163,7 @@ impl Library {
             .or_else(|| summary.src.as_deref().and_then(src_title))
             .unwrap_or_else(|| summary.key.clone());
         let stem = folder_name(&title);
-        let folder = match self.local.iter().find(|l| {
-            l.metadata
-                .as_ref()
-                .is_some_and(|m| m.resource == summary.key)
-        }) {
-            Some(local) => local.folder.clone(),
-            None => {
-                let folder = self.root.join(&stem);
-                if folder.exists() {
-                    self.root
-                        .join(format!("{stem}{}", clash_suffix(&summary.key)))
-                } else {
-                    folder
-                }
-            }
-        };
+        let folder = self.title_folder(&stem, &summary.key)?;
 
         let temp = self.root.join(temp_name());
         std::fs::create_dir(&temp)?;

@@ -99,7 +99,7 @@ fn sync_item_writes_title_folder_with_decrypted_epub_acsm_and_metadata() {
             &t,
         )
         .unwrap();
-    let folder = root.path().join("White Sand");
+    let folder = root.path().join("White Sand [a]");
     assert_eq!(out.folder, folder);
     assert!(folder.join("White Sand.epub").is_file() && folder.join("White Sand.acsm").is_file());
     assert_eq!(
@@ -135,7 +135,7 @@ fn sync_item_records_loan_block_and_expiry() {
         Some("2026-11-02T00:00:00Z"),
         adept_epub(KEY),
     );
-    let loan = Metadata::read(&root.path().join("White Sand"))
+    let loan = Metadata::read(&root.path().join("White Sand [a]"))
         .unwrap()
         .loan
         .unwrap();
@@ -144,17 +144,34 @@ fn sync_item_records_loan_block_and_expiry() {
     assert!(loan.token.contains("loanToken"));
 }
 
+const UUID: &str = "urn:uuid:7e28ffed-5120-2115-d314-b3975b1b6481";
+
+/// A title folder `name` in `root` that belongs to `resource`.
+fn foreign_folder(root: &Path, name: &str, resource: &str) -> PathBuf {
+    let folder = root.join(name);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("keep.txt"), "other").unwrap();
+    Metadata {
+        resource: resource.into(),
+        title: "White Sand".into(),
+        author: None,
+        format: "application/epub+zip".into(),
+        fulfillment: None,
+        source: Source::Cloud,
+        synced_at: "2026-10-19T10:00:00Z".into(),
+        returned: false,
+        loan: None,
+    }
+    .write(&folder)
+    .unwrap();
+    folder
+}
+
 #[test]
-fn second_title_with_same_name_gets_clash_suffix() {
+fn same_title_for_different_resources_gets_distinct_suffixed_folders() {
     let root = tempdir();
-    sync(
-        &Library::open(root.path()).unwrap(),
-        "urn:uuid:7e28ffed-0000-0000-0000-000000000000",
-        "Same",
-        None,
-        adept_epub(KEY),
-    );
     let lib = Library::open(root.path()).unwrap();
+    sync(&lib, UUID, "Same", None, adept_epub(KEY));
     sync(
         &lib,
         "urn:uuid:11112222-0000-0000-0000-000000000000",
@@ -162,13 +179,101 @@ fn second_title_with_same_name_gets_clash_suffix() {
         None,
         adept_epub(KEY),
     );
-    assert!(root.path().join("Same").join("Same.epub").is_file());
+    let first = root.path().join("Same [7e28ffed]");
     let second = root.path().join("Same [11112222]");
-    assert!(second.join("Same.epub").is_file());
+    assert!(first.join("Same.epub").is_file() && second.join("Same.epub").is_file());
+    assert_eq!(Metadata::read(&first).unwrap().resource, UUID);
     assert_eq!(
         Metadata::read(&second).unwrap().resource,
         "urn:uuid:11112222-0000-0000-0000-000000000000"
     );
+}
+
+#[test]
+fn folder_title_comes_from_fulfillment_not_acsm() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let t = FakeTransport::new()
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:a",
+                "White Sand",
+                "https://dl.example/a.epub",
+                None,
+            ),
+        )
+        .respond("/a.epub", 200, adept_epub(KEY));
+    let out = lib
+        .sync_item(
+            acsm_xml("urn:uuid:a", "Shop Listing Name").as_bytes(),
+            &activation(),
+            &t,
+        )
+        .unwrap();
+    assert_eq!(out.folder, root.path().join("White Sand [a]"));
+    assert!(out.folder.join("White Sand.epub").is_file());
+    assert_eq!(out.metadata.title, "White Sand");
+}
+
+#[test]
+fn resync_on_same_library_instance_reuses_folder() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    sync(&lib, "urn:uuid:a", "White Sand", None, adept_epub(KEY));
+    sync(&lib, "urn:uuid:a", "White Sand", None, adept_epub(KEY));
+    let names: Vec<_> = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["White Sand [a]"]);
+}
+
+#[test]
+fn name_taken_by_other_resource_uses_full_id() {
+    let root = tempdir();
+    let other = foreign_folder(
+        root.path(),
+        "White Sand [7e28ffed]",
+        "urn:uuid:7e28ffed-0000-0000-0000-000000000000",
+    );
+    let lib = Library::open(root.path()).unwrap();
+    sync(&lib, UUID, "White Sand", None, adept_epub(KEY));
+    let full = root
+        .path()
+        .join("White Sand [7e28ffed-5120-2115-d314-b3975b1b6481]");
+    assert_eq!(Metadata::read(&full).unwrap().resource, UUID);
+    assert!(full.join("White Sand.epub").is_file());
+    assert_eq!(
+        Metadata::read(&other).unwrap().resource,
+        "urn:uuid:7e28ffed-0000-0000-0000-000000000000"
+    );
+    assert!(other.join("keep.txt").is_file() && !other.join("White Sand.epub").exists());
+}
+
+#[test]
+fn full_id_name_taken_by_other_resource_fails_without_replacing() {
+    let root = tempdir();
+    foreign_folder(root.path(), "White Sand [7e28ffed]", "urn:uuid:x");
+    let full = foreign_folder(
+        root.path(),
+        "White Sand [7e28ffed-5120-2115-d314-b3975b1b6481]",
+        "urn:uuid:y",
+    );
+    let lib = Library::open(root.path()).unwrap();
+    let t = FakeTransport::new()
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(UUID, "White Sand", "https://dl.example/a.epub", None),
+        )
+        .respond("/a.epub", 200, adept_epub(KEY));
+    let result = lib.sync_item(acsm_xml(UUID, "White Sand").as_bytes(), &activation(), &t);
+    assert!(matches!(result, Err(LibraryError::Io(_))), "{result:?}");
+    assert_eq!(Metadata::read(&full).unwrap().resource, "urn:uuid:y");
+    assert!(full.join("keep.txt").is_file());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
 }
 
 #[test]
@@ -226,7 +331,7 @@ fn failed_resync_keeps_previous_folder() {
         None,
         adept_epub(KEY),
     );
-    let book = root.path().join("White Sand").join("White Sand.epub");
+    let book = root.path().join("White Sand [a]").join("White Sand.epub");
     let first = std::fs::read(&book).unwrap();
     let lib = Library::open(root.path()).unwrap();
     let t = FakeTransport::new()
@@ -269,7 +374,8 @@ fn resync_replaces_existing_folder() {
         None,
         epub_with_text(b"<p>Second edition</p>"),
     );
-    let written = std::fs::read(root.path().join("White Sand").join("White Sand.epub")).unwrap();
+    let written =
+        std::fs::read(root.path().join("White Sand [a]").join("White Sand.epub")).unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&written)).unwrap();
     let mut chapter = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("OEBPS/ch1.xhtml").unwrap(), &mut chapter)
@@ -383,7 +489,7 @@ fn return_loan_clears_loan_and_marks_returned() {
     );
     let metadata = return_loan(&item, &activation(), &t).unwrap();
     assert!(metadata.loan.is_none() && metadata.returned);
-    let folder = root.path().join("White Sand");
+    let folder = root.path().join("White Sand [a]");
     assert_eq!(Metadata::read(&folder).unwrap(), metadata);
     assert!(folder.join("White Sand.epub").is_file());
     let rows = merge(
@@ -404,7 +510,7 @@ fn return_loan_error_keeps_loan() {
     );
     let err = return_loan(&item, &activation(), &t).unwrap_err();
     assert!(err.to_string().contains("E_LOAN_NOT_ON_RECORD"));
-    let metadata = Metadata::read(&root.path().join("White Sand")).unwrap();
+    let metadata = Metadata::read(&root.path().join("White Sand [a]")).unwrap();
     assert!(metadata.loan.is_some() && !metadata.returned);
 }
 

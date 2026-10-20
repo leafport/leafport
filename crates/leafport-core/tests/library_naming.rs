@@ -1,5 +1,5 @@
 use leafport_core::library::{
-    Format, LibraryError, acsm_summary, clash_suffix, folder_name, src_title,
+    Format, LibraryError, acsm_summary, folder_name, full_id_suffix, id_suffix, src_title,
 };
 
 const SAMPLE_ACSM: &str = r#"<fulfillmentToken xmlns="http://ns.adobe.com/adept" xmlns:dc="http://purl.org/dc/elements/1.1/"><distributor>urn:uuid:d</distributor><operatorURL>https://acs4.kobo.com/fulfillment</operatorURL><transaction>t</transaction><expiration>2020-01-01T00:00:00Z</expiration><resourceItemInfo><resource>urn:uuid:7e28ffed-5120-2115-d314-b3975b1b6481</resource><resourceItem>0</resourceItem><metadata><dc:title>White Sand</dc:title><dc:creator>Brandon Sanderson</dc:creator><dc:format>application/pdf</dc:format></metadata><src>https://acs4.kobo.com/dl/White%20Sand.pdf</src></resourceItemInfo></fulfillmentToken>"#;
@@ -37,12 +37,29 @@ fn folder_name_handles_hostile_titles() {
 }
 
 #[test]
-fn clash_suffix_uses_uuid_prefix() {
+fn id_suffix_uses_first_eight_id_characters() {
     assert_eq!(
-        clash_suffix("urn:uuid:7e28ffed-5120-2115-d314-b3975b1b6481"),
+        id_suffix("urn:uuid:7e28ffed-5120-2115-d314-b3975b1b6481"),
         " [7e28ffed]"
     );
-    assert_eq!(clash_suffix("isbn:12345678901"), " [isbn123]");
+    assert_eq!(
+        id_suffix("sha1:0123456789abcdef0123456789abcdef01234567"),
+        " [01234567]"
+    );
+    assert_eq!(id_suffix("isbn:12345678901"), " [isbn123]");
+}
+
+#[test]
+fn full_id_suffix_keeps_whole_id() {
+    assert_eq!(
+        full_id_suffix("urn:uuid:7e28ffed-5120-2115-d314-b3975b1b6481"),
+        " [7e28ffed-5120-2115-d314-b3975b1b6481]"
+    );
+    assert_eq!(
+        full_id_suffix("sha1:0123456789abcdef0123456789abcdef01234567"),
+        " [0123456789abcdef0123456789abcdef01234567]"
+    );
+    assert_eq!(full_id_suffix("isbn:1/2"), " [isbn12]");
 }
 
 #[test]

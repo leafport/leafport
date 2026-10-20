@@ -51,9 +51,25 @@ pub fn folder_name(title: &str) -> String {
     name
 }
 
-/// Suffix that tells apart folders for different titles with the same name.
-pub fn clash_suffix(resource: &str) -> String {
-    let id = resource.strip_prefix("urn:uuid:").unwrap_or(resource);
-    let head: String = id.chars().take(8).filter(|c| !is_dropped(*c)).collect();
+/// The resource id without a leading `urn:uuid:` or `sha1:`.
+fn bare_id(key: &str) -> &str {
+    key.strip_prefix("urn:uuid:")
+        .or_else(|| key.strip_prefix("sha1:"))
+        .unwrap_or(key)
+}
+
+/// Folder suffix from the first 8 characters of the resource id.
+pub fn id_suffix(key: &str) -> String {
+    let head: String = bare_id(key)
+        .chars()
+        .take(8)
+        .filter(|c| !is_dropped(*c))
+        .collect();
     format!(" [{head}]")
+}
+
+/// Folder suffix from the whole resource id, used when the short name is taken.
+pub fn full_id_suffix(key: &str) -> String {
+    let id: String = bare_id(key).chars().filter(|c| !is_dropped(*c)).collect();
+    format!(" [{id}]")
 }
