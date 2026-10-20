@@ -401,6 +401,7 @@ impl Error for ActivateError {}
 ///
 /// Credentials are RSA-encrypted before the request leaves this function and are never
 /// logged. On an HTTP error the body is retained so a semantic ADEPT error can surface.
+#[allow(clippy::too_many_arguments)]
 pub fn perform_sign_in(
     client: &crate::service::ServiceClient,
     auth_url: &str,
@@ -421,10 +422,10 @@ pub fn perform_sign_in(
         .map_err(ActivateError::Transport)?;
     if !response.status.is_success() {
         // Surface a semantic ADEPT error when the body carries one.
-        if let Ok(xml) = std::str::from_utf8(&response.body) {
-            if let Err(error @ SignInResponseError::Service { .. }) = parse_sign_in_response(xml) {
-                return Err(ActivateError::Response(error));
-            }
+        if let Ok(xml) = std::str::from_utf8(&response.body)
+            && let Err(error @ SignInResponseError::Service { .. }) = parse_sign_in_response(xml)
+        {
+            return Err(ActivateError::Response(error));
         }
         return Err(ActivateError::Http {
             status: response.status,

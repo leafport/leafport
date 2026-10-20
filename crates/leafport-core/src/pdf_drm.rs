@@ -350,7 +350,7 @@ fn decrypt_value(data: &[u8], key: &[u8], cipher: Cipher) -> Result<Vec<u8>, Pdf
 
 fn aes_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, PdfDrmError> {
     use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
-    if data.len() < 32 || (data.len() - 16) % 16 != 0 {
+    if data.len() < 32 || !(data.len() - 16).is_multiple_of(16) {
         return Err(PdfDrmError::Truncated);
     }
     let (iv, ciphertext) = data.split_at(16);

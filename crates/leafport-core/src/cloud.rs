@@ -118,10 +118,10 @@ fn exchange<T>(
         .map_err(CloudError::Transport)?;
     if !response.status.is_success() {
         // Preserve semantic ADEPT errors when available, otherwise retain bytes.
-        if let Ok(xml) = std::str::from_utf8(&response.body) {
-            if let Err(error @ CloudResponseError::Service { .. }) = parse(xml) {
-                return Err(CloudError::Response(error));
-            }
+        if let Ok(xml) = std::str::from_utf8(&response.body)
+            && let Err(error @ CloudResponseError::Service { .. }) = parse(xml)
+        {
+            return Err(CloudError::Response(error));
         }
         return Err(CloudError::Http {
             status: response.status,

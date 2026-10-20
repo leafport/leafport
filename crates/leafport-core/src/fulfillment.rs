@@ -541,10 +541,10 @@ pub fn perform_fulfillment(
         .post_adept(&fulfill_url(acsm.operator_url()), request)
         .map_err(FulfillError::Transport)?;
     if !response.status.is_success() {
-        if let Ok(xml) = std::str::from_utf8(&response.body) {
-            if let Err(error @ FulfillResponseError::Service { .. }) = parse_fulfillment(xml) {
-                return Err(FulfillError::Response(error));
-            }
+        if let Ok(xml) = std::str::from_utf8(&response.body)
+            && let Err(error @ FulfillResponseError::Service { .. }) = parse_fulfillment(xml)
+        {
+            return Err(FulfillError::Response(error));
         }
         return Err(FulfillError::Http {
             status: response.status,
@@ -638,10 +638,10 @@ pub fn perform_loan_return(
         .post_adept(&loan_return_url(operator_url), request)
         .map_err(FulfillError::Transport)?;
     if !response.status.is_success() {
-        if let Ok(xml) = std::str::from_utf8(&response.body) {
-            if let Err(error @ FulfillResponseError::Service { .. }) = check_not_error(xml) {
-                return Err(FulfillError::Response(error));
-            }
+        if let Ok(xml) = std::str::from_utf8(&response.body)
+            && let Err(error @ FulfillResponseError::Service { .. }) = check_not_error(xml)
+        {
+            return Err(FulfillError::Response(error));
         }
         return Err(FulfillError::Http {
             status: response.status,
