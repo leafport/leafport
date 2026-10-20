@@ -340,6 +340,10 @@ impl App {
                         if let Some(warning) = outcome.warning {
                             add_banner(&mut self.banner, warning);
                         }
+                        // Fetch the cloud record the import uploaded.
+                        if self.account.signed_in.is_some() {
+                            self.refresh(ctx);
+                        }
                     }
                     Err(e) => add_banner(&mut self.banner, format!("Import failed: {e}")),
                 }
