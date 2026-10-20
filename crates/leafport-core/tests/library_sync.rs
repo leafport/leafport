@@ -550,6 +550,29 @@ fn return_loan_error_keeps_loan() {
 }
 
 #[test]
+fn return_loan_works_for_local_row_without_cloud_record() {
+    let root = tempdir();
+    sync(
+        &Library::open(root.path()).unwrap(),
+        "urn:uuid:a",
+        "White Sand",
+        Some("2026-11-02T00:00:00Z"),
+        adept_epub(KEY),
+    );
+    let rows = merge(&[], &Library::open(root.path()).unwrap().local);
+    assert_eq!(rows[0].state, ItemState::Local);
+    let t = FakeTransport::new().respond(
+        "/fulfillment/LoanReturn",
+        200,
+        "<envelope xmlns=\"http://ns.adobe.com/adept\"/>",
+    );
+    let metadata = return_loan(&rows[0], &activation(), &t).unwrap();
+    assert!(metadata.loan.is_none() && metadata.returned);
+    let folder = root.path().join("White Sand [a]");
+    assert_eq!(Metadata::read(&folder).unwrap(), metadata);
+}
+
+#[test]
 fn return_loan_without_loan_is_not_on_loan() {
     let root = tempdir();
     sync(

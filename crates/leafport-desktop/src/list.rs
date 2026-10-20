@@ -210,10 +210,13 @@ fn action(ui: &mut egui::Ui, item: &Item, busy: &Busy<'_>) -> Option<Action> {
         return None;
     }
     let key = || item.key.clone();
+    // A loan can be returned without a cloud record, so local loan folders offer it too.
+    let on_loan = item.metadata.as_ref().is_some_and(|m| m.loan.is_some());
     match item.state {
         ItemState::Available => ui.button("Sync").clicked().then(|| Action::Sync(key())),
         ItemState::Failed(_) => ui.button("Retry").clicked().then(|| Action::Sync(key())),
         ItemState::OnLoan { .. } => ui.button("Return").clicked().then(|| Action::Return(key())),
+        ItemState::Local if on_loan => ui.button("Return").clicked().then(|| Action::Return(key())),
         ItemState::Synced | ItemState::Returned | ItemState::Local => {
             let folder = item.folder.as_ref();
             ui.add_enabled(folder.is_some(), egui::Button::new("Show in folder"))
