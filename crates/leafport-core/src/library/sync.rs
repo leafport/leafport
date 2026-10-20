@@ -156,15 +156,20 @@ impl Library {
             },
             format => format,
         };
-        // The book's own title wins. Read from the original download: a
-        // decrypted PDF has lost the /Encrypt dictionary that can carry the title.
         let publication = decrypt_publication(
             &body,
             format,
             f.license_token_xml.as_deref(),
             &activation.keys.license,
         )?;
-        let title = book_title(&body, format)
+        // The book's own title wins. An EPUB's OPF may be encrypted, so
+        // read it decrypted. A PDF is read from the original download: a decrypted PDF
+        // has lost the /Encrypt dictionary that can carry the title.
+        let title_source = match format {
+            Format::Pdf => &body,
+            _ => &publication,
+        };
+        let title = book_title(title_source, format)
             .or_else(|| f.title.clone())
             .or_else(|| summary.title.clone())
             .or_else(|| summary.src.as_deref().and_then(src_title))

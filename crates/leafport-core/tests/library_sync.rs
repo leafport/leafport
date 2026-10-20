@@ -253,6 +253,32 @@ fn folder_title_comes_from_book_metadata() {
 }
 
 #[test]
+fn folder_title_comes_from_encrypted_book_metadata() {
+    let opf = br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Hidden Title</dc:title></metadata>
+  <manifest/><spine/>
+</package>"#;
+    let opf_data = ADEPT_DATA.replace("OEBPS/ch%31.xhtml", "OEBPS/content.opf");
+    let encrypted_opf = aes_encrypt(&KEY, &IV, opf, true);
+    let book = protected_epub(
+        KEY,
+        &[("OEBPS/content.opf", &encrypted_opf)],
+        &[ADEPT_DATA, &opf_data],
+    );
+    let root = tempdir();
+    sync(
+        &Library::open(root.path()).unwrap(),
+        "urn:uuid:a",
+        "Server Title",
+        None,
+        book,
+    );
+    let folder = root.path().join("Hidden Title [a]");
+    assert_eq!(Metadata::read(&folder).unwrap().title, "Hidden Title");
+}
+
+#[test]
 fn resync_on_same_library_instance_reuses_folder() {
     let root = tempdir();
     let lib = Library::open(root.path()).unwrap();
