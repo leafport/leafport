@@ -4,7 +4,7 @@
 //! resources decrypted, font obfuscation kept); an EBX PDF is decrypted with lopdf.
 //! Covers come from the EPUB's OPF or from page 1 of a PDF rendered by pdfium.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -120,17 +120,24 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
         .ok_or_else(|| LibraryError::Drm("protected EPUB has no readable rights.xml".into()))?;
     let key = drm::content_key(&rights, license_key).map_err(drm_error)?;
     // Match CipherReference URIs to archive paths by percent-decoding them.
-    let resources: HashMap<String, bool> = drm::encrypted_resources(&encryption)
+    let listed: Vec<(String, String, bool)> = drm::encrypted_resources(&encryption)
         .map_err(drm_error)?
         .into_iter()
         .map(|resource| {
             let decoded = percent_encoding::percent_decode_str(&resource.uri)
                 .decode_utf8()
                 .map(|s| s.into_owned())
-                .unwrap_or(resource.uri);
-            (decoded, resource.compressed)
+                .unwrap_or_else(|_| resource.uri.clone());
+            (decoded, resource.uri, resource.compressed)
         })
         .collect();
+    let resources: HashMap<&str, bool> = listed
+        .iter()
+        .map(|(decoded, _, compressed)| (decoded.as_str(), *compressed))
+        .collect();
+    // The listed resources that were decrypted. One without an entry would leave the
+    // book with ciphertext whose encryption.xml entry is stripped.
+    let mut matched = HashSet::new();
     let remaining_encryption = strip_adept_entries(&encryption);
 
     let mut out = ZipWriter::new(Cursor::new(Vec::new()));
@@ -167,8 +174,9 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
                     out.write_all(text.as_bytes())?;
                 }
             }
-            _ => match resources.get(&name) {
+            _ => match resources.get(name.as_str()) {
                 Some(&compressed) => {
+                    matched.insert(name.clone());
                     let file = zip.by_index(index).map_err(io::Error::from)?;
                     let raw = read_limited(file, MAX_OUTPUT_BYTES - total)
                         .ok_or_else(|| invalid(format!("{name}: entry too large")))?;
@@ -186,6 +194,14 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
                 }
             },
         }
+    }
+    if let Some((_, uri, _)) = listed
+        .iter()
+        .find(|(decoded, ..)| !matched.contains(decoded))
+    {
+        return Err(LibraryError::Drm(format!(
+            "encrypted resource {uri} is not in the EPUB"
+        )));
     }
     Ok(out.finish().map_err(io::Error::from)?.into_inner())
 }

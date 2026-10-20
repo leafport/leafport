@@ -141,6 +141,19 @@ fn font_obfuscation_entries_survive_decryption() {
 }
 
 #[test]
+fn adept_resource_missing_from_archive_is_a_drm_error() {
+    let missing = r#"<enc:EncryptedData>
+        <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        <enc:CipherData><enc:CipherReference URI="OEBPS/missing.xhtml"/></enc:CipherData>
+    </enc:EncryptedData>"#;
+    let source = protected_epub(KEY, &[], &[ADEPT_DATA, missing]);
+    match decrypt_publication(&source, Format::Epub, None, common::key()) {
+        Err(LibraryError::Drm(message)) => assert!(message.contains("OEBPS/missing.xhtml")),
+        other => panic!("expected a DRM error, got {:?}", other.map(|out| out.len())),
+    }
+}
+
+#[test]
 fn epub_for_another_device_is_a_drm_error() {
     // rights.xml is wrapped to another device.
     let result = decrypt_publication(&adept_epub(KEY), Format::Epub, None, common::other_key());
