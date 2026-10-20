@@ -28,6 +28,8 @@ pub struct App {
     pub settings: Settings,
     account: account::Account,
     refreshing: bool,
+    /// Bumped on sign-in and sign-out; a refresh started under an older value is stale.
+    generation: u64,
     covers: list::Covers,
     tx: Sender<Event>,
     rx: Receiver<Event>,
@@ -101,6 +103,7 @@ impl App {
             settings,
             account: account::Account::new(),
             refreshing: false,
+            generation: 0,
             covers: list::Covers::default(),
             tx,
             rx,
@@ -127,7 +130,26 @@ impl App {
             return;
         }
         self.refreshing = true;
-        jobs::refresh(&self.tx, ctx, paths::cache_path());
+        jobs::refresh(&self.tx, ctx, paths::cache_path(), self.generation);
+    }
+
+    /// Start a new account generation: in-flight refreshes become stale and a new one may start.
+    fn new_generation(&mut self) {
+        self.generation += 1;
+        self.refreshing = false;
+    }
+
+    fn remove_cache(&mut self) {
+        if let Some(path) = paths::cache_path() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => add_banner(
+                    &mut self.banner,
+                    format!("Could not remove the cloud list cache: {e}"),
+                ),
+            }
+        }
     }
 
     /// Re-read the books folder without sweeping temp folders, so a running sync is safe.
@@ -146,17 +168,13 @@ impl App {
         if self.account.sign_out().is_err() {
             return;
         }
-        if let Some(path) = paths::cache_path() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => add_banner(
-                    &mut self.banner,
-                    format!("Could not remove the cloud list cache: {e}"),
-                ),
-            }
-        }
+        self.new_generation();
+        self.remove_cache();
         self.cloud.clear();
+        // Queued cloud rows have no ACSM once the list is gone, and old failures would
+        // mark the remaining Local rows Failed.
+        self.queue.clear();
+        self.failures.clear();
         self.remerge();
     }
 
@@ -165,10 +183,21 @@ impl App {
             Event::Vendors(result) => self.account.on_vendors(result),
             Event::SignIn(result) => {
                 if self.account.on_sign_in(result) {
+                    self.new_generation();
                     self.refresh(ctx);
                 }
             }
-            Event::Refreshed(result) => {
+            Event::Refreshed { generation, .. }
+                if generation != self.generation || self.account.signed_in.is_none() =>
+            {
+                // Started before a sign-in or sign-out: it may have rewritten the cache
+                // after sign-out removed it. Drop it, and refetch for a current account.
+                self.remove_cache();
+                if self.account.signed_in.is_some() && !self.refreshing {
+                    self.refresh(ctx);
+                }
+            }
+            Event::Refreshed { result, .. } => {
                 self.refreshing = false;
                 match result {
                     Ok(cloud) => {

@@ -18,8 +18,12 @@ pub enum Event {
     Vendors(Result<VendorCatalog, String>),
     /// A completed sign-in: the activated account label, or an error message.
     SignIn(Result<String, String>),
-    /// A completed list refresh: the cloud records, or an error message.
-    Refreshed(Result<Vec<DownloadRecord>, String>),
+    /// A completed list refresh: the cloud records, or an error message. `generation` is
+    /// the account generation the refresh was started under.
+    Refreshed {
+        generation: u64,
+        result: Result<Vec<DownloadRecord>, String>,
+    },
     /// A completed sync of the row with `key`.
     Synced {
         key: String,
@@ -66,7 +70,7 @@ fn load_activation() -> Result<ActivationState, String> {
 }
 
 /// Fetch the cloud list and store it in the cache.
-pub fn refresh(tx: &Sender<Event>, ctx: &egui::Context, cache: Option<PathBuf>) {
+pub fn refresh(tx: &Sender<Event>, ctx: &egui::Context, cache: Option<PathBuf>, generation: u64) {
     spawn(
         tx,
         ctx,
@@ -76,7 +80,7 @@ pub fn refresh(tx: &Sender<Event>, ctx: &egui::Context, cache: Option<PathBuf>) 
             let client = ServiceClient::new().map_err(|e| e.to_string())?;
             library::refresh(&cache, &activation, &client).map_err(|e| e.to_string())
         },
-        Event::Refreshed,
+        move |result| Event::Refreshed { generation, result },
     );
 }
 
