@@ -171,9 +171,7 @@ impl Library {
         let stem = folder_name(&title);
         let folder = self.title_folder(&stem, &summary.key)?;
 
-        let temp = self.root.join(temp_name());
-        std::fs::create_dir(&temp)?;
-        let write = || -> Result<Metadata, LibraryError> {
+        let write = |temp: &Path| -> Result<Metadata, LibraryError> {
             write_atomic(&temp.join(format!("{stem}.acsm")), acsm_bytes)?;
             let extension = format.extension().ok_or(LibraryError::UnsupportedFormat)?;
             write_atomic(&temp.join(format!("{stem}.{extension}")), &publication)?;
@@ -203,28 +201,52 @@ impl Library {
                 returned: false,
                 loan,
             };
-            metadata.write(&temp)?;
-            replace_folder(&self.root, &temp, &folder)?;
+            metadata.write(temp)?;
             Ok(metadata)
         };
-        match write() {
-            Ok(metadata) => Ok(SyncOutcome {
-                folder,
-                metadata,
-                warning: None,
-            }),
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&temp);
-                Err(e)
-            }
-        }
+        let metadata = stage_folder(&self.root, &folder, write, &|from, to| {
+            std::fs::rename(from, to)
+        })?;
+        Ok(SyncOutcome {
+            folder,
+            metadata,
+            warning: None,
+        })
     }
 }
 
+type Rename<'a> = &'a dyn Fn(&Path, &Path) -> std::io::Result<()>;
+
+/// Runs `write` in a fresh temp folder under `root`, then moves that folder to
+/// `folder`. A failure at any point removes the temp folder and keeps a previous
+/// `folder`. `rename` is a seam so tests can fail a move.
+fn stage_folder<T>(
+    root: &Path,
+    folder: &Path,
+    write: impl FnOnce(&Path) -> Result<T, LibraryError>,
+    rename: Rename,
+) -> Result<T, LibraryError> {
+    let temp = root.join(temp_name());
+    std::fs::create_dir(&temp)?;
+    let result = write(&temp).and_then(|value| {
+        replace_folder(root, &temp, folder, rename)?;
+        Ok(value)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    result
+}
+
 /// Moves `temp` to `folder`, swapping out an existing folder so a failure keeps it.
-fn replace_folder(root: &Path, temp: &Path, folder: &Path) -> Result<(), LibraryError> {
+fn replace_folder(
+    root: &Path,
+    temp: &Path,
+    folder: &Path,
+    rename: Rename,
+) -> Result<(), LibraryError> {
     if !folder.exists() {
-        std::fs::rename(temp, folder)?;
+        rename(temp, folder)?;
         return Ok(());
     }
     let name = folder
@@ -233,9 +255,9 @@ fn replace_folder(root: &Path, temp: &Path, folder: &Path) -> Result<(), Library
         .unwrap_or_default();
     // Not a `.tmp-` name: `Library::open` restores this folder instead of sweeping it.
     let old = root.join(format!(".old-{:016x}-{name}", rand::random::<u64>()));
-    std::fs::rename(folder, &old)?;
-    if let Err(e) = std::fs::rename(temp, folder) {
-        if let Err(restore) = std::fs::rename(&old, folder) {
+    rename(folder, &old)?;
+    if let Err(e) = rename(temp, folder) {
+        if let Err(restore) = rename(&old, folder) {
             return Err(std::io::Error::new(
                 e.kind(),
                 format!(
@@ -304,4 +326,98 @@ pub fn load_cache(cache_path: &Path) -> Result<Vec<DownloadRecord>, LibraryError
         Err(e) => return Err(e.into()),
     };
     cloud::download_records(&xml).map_err(|e| CloudError::Response(e).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    fn root() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("leafport-stage-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn names(root: &Path) -> Vec<String> {
+        let mut out: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn put(temp: &Path) -> Result<(), LibraryError> {
+        std::fs::write(temp.join("book.epub"), b"new")?;
+        Ok(())
+    }
+
+    #[test]
+    fn write_failure_after_temp_exists_leaves_nothing() {
+        let root = root();
+        let folder = root.join("Title [a]");
+        let result = stage_folder(
+            &root,
+            &folder,
+            |temp| {
+                put(temp)?;
+                assert_eq!(names(&root).len(), 1, "temp folder exists");
+                Err::<(), _>(LibraryError::Drm("boom".into()))
+            },
+            &|from, to| std::fs::rename(from, to),
+        );
+        assert!(matches!(result, Err(LibraryError::Drm(_))));
+        assert!(names(&root).is_empty(), "{:?}", names(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_final_rename_without_previous_folder_leaves_nothing() {
+        let root = root();
+        let folder = root.join("Title [a]");
+        let result = stage_folder(&root, &folder, put, &|_, _| {
+            Err(io::Error::other("rename failed"))
+        });
+        assert!(result.is_err());
+        assert!(names(&root).is_empty(), "{:?}", names(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_final_rename_restores_previous_folder() {
+        let root = root();
+        let folder = root.join("Title [a]");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("book.epub"), b"old").unwrap();
+        // Fail only the move of the new folder into place.
+        let result = stage_folder(&root, &folder, put, &|from, to| {
+            if to == folder
+                && from
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(".tmp-"))
+            {
+                Err(io::Error::other("rename failed"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(folder.join("book.epub")).unwrap(), b"old");
+        assert_eq!(names(&root), vec!["Title [a]".to_owned()]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn successful_swap_replaces_folder_and_removes_old() {
+        let root = root();
+        let folder = root.join("Title [a]");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("book.epub"), b"old").unwrap();
+        stage_folder(&root, &folder, put, &|from, to| std::fs::rename(from, to)).unwrap();
+        assert_eq!(std::fs::read(folder.join("book.epub")).unwrap(), b"new");
+        assert_eq!(names(&root), vec!["Title [a]".to_owned()]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -332,7 +332,7 @@ fn adept_error_response_leaves_nothing_and_reports_data() {
 }
 
 #[test]
-fn failure_after_temp_folder_leaves_no_title_or_tmp_folder() {
+fn drm_failure_leaves_nothing() {
     let root = tempdir();
     let lib = Library::open(root.path()).unwrap();
     let t = FakeTransport::new()
