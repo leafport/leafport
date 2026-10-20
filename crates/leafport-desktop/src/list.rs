@@ -8,7 +8,7 @@ use std::{
     sync::mpsc::Sender,
 };
 
-use crate::jobs::{self, Event};
+use crate::jobs::{self, Event, Job};
 
 pub const ROW_HEIGHT: f32 = 72.0;
 const COVER: egui::Vec2 = egui::vec2(48.0, 64.0);
@@ -31,6 +31,11 @@ impl Covers {
         self.textures.insert(path, texture);
     }
 
+    /// Drop the textures of covers inside `folder`, so a replaced cover is read again.
+    pub fn forget(&mut self, folder: &Path) {
+        self.textures.retain(|path, _| !path.starts_with(folder));
+    }
+
     fn get(
         &mut self,
         path: &Path,
@@ -45,10 +50,49 @@ impl Covers {
     }
 }
 
-/// Which rows are queued or syncing.
+/// Which rows are queued, syncing or returning, and the last return error per row.
 pub struct Busy<'a> {
-    pub syncing: &'a HashSet<String>,
-    pub queue: &'a VecDeque<String>,
+    pub running: Option<&'a Job>,
+    pub queue: &'a VecDeque<Job>,
+    pub returning: &'a HashSet<String>,
+    pub row_errors: &'a HashMap<String, String>,
+}
+
+impl Busy<'_> {
+    /// True while the row's sync or loan return runs.
+    fn working(&self, key: &str) -> bool {
+        matches!(self.running, Some(Job::Sync(k)) if k == key) || self.returning.contains(key)
+    }
+
+    fn queued(&self, key: &str) -> bool {
+        self.queue
+            .iter()
+            .any(|job| matches!(job, Job::Sync(k) if k == key))
+    }
+}
+
+/// A row button that was clicked.
+pub enum Action {
+    /// Sync or Retry the row with this key.
+    Sync(String),
+    /// Return the loan of the row with this key.
+    Return(String),
+    /// Open this title folder in the file manager.
+    ShowInFolder(PathBuf),
+}
+
+/// Open `path` in the platform file manager.
+pub fn show_in_folder(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let program = "xdg-open";
+    let mut child = std::process::Command::new(program).arg(path).spawn()?;
+    // Reap the launcher when it exits, so it leaves no zombie process.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 fn state_label(state: &ItemState) -> &'static str {
@@ -62,14 +106,14 @@ fn state_label(state: &ItemState) -> &'static str {
     }
 }
 
-/// Draw the visible rows. Returns the key of a row whose Sync or Retry was clicked.
+/// Draw the visible rows. Returns the row button that was clicked, if any.
 pub fn show(
     ui: &mut egui::Ui,
     rows: &[Item],
     busy: Busy<'_>,
     covers: &mut Covers,
     tx: &Sender<Event>,
-) -> Option<String> {
+) -> Option<Action> {
     let mut clicked = None;
     let ctx = ui.ctx().clone();
     egui::ScrollArea::vertical()
@@ -88,11 +132,11 @@ pub fn show(
                             .and_then(|path| covers.get(path, tx, &ctx));
                         cover(ui, texture, item.format.label());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if action(ui, item, &busy) {
-                                clicked = Some(item.key.clone());
+                            if let Some(action) = action(ui, item, &busy) {
+                                clicked = Some(action);
                             }
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                text(ui, item);
+                                text(ui, item, busy.row_errors.get(&item.key));
                             });
                         });
                     },
@@ -128,7 +172,7 @@ fn cover(ui: &mut egui::Ui, texture: Option<&egui::TextureHandle>, format: &str)
     }
 }
 
-fn text(ui: &mut egui::Ui, item: &Item) {
+fn text(ui: &mut egui::Ui, item: &Item, row_error: Option<&String>) {
     ui.add(egui::Label::new(egui::RichText::new(&item.title).strong()).truncate());
     let mut info = format!("{} · {}", item.format.label(), state_label(&item.state));
     if let ItemState::OnLoan {
@@ -141,7 +185,11 @@ fn text(ui: &mut egui::Ui, item: &Item) {
         ));
     }
     ui.add(egui::Label::new(info).truncate());
-    if let ItemState::Failed(message) = &item.state {
+    let error = match &item.state {
+        ItemState::Failed(message) => Some(message),
+        _ => row_error,
+    };
+    if let Some(message) = error {
         ui.add(
             egui::Label::new(egui::RichText::new(message).color(ui.visuals().error_fg_color))
                 .truncate(),
@@ -151,27 +199,27 @@ fn text(ui: &mut egui::Ui, item: &Item) {
     }
 }
 
-/// Draw the row's action. Returns true when Sync or Retry was clicked.
-fn action(ui: &mut egui::Ui, item: &Item, busy: &Busy<'_>) -> bool {
-    if busy.syncing.contains(&item.key) {
+/// Draw the row's action. Returns the action when its button was clicked.
+fn action(ui: &mut egui::Ui, item: &Item, busy: &Busy<'_>) -> Option<Action> {
+    if busy.working(&item.key) {
         ui.spinner();
-        return false;
+        return None;
     }
-    if busy.queue.contains(&item.key) {
+    if busy.queued(&item.key) {
         ui.weak("Queued");
-        return false;
+        return None;
     }
+    let key = || item.key.clone();
     match item.state {
-        ItemState::Available => ui.button("Sync").clicked(),
-        ItemState::Failed(_) => ui.button("Retry").clicked(),
-        // Return and Show in folder are wired in a later change.
-        ItemState::OnLoan { .. } => {
-            ui.add_enabled(false, egui::Button::new("Return"));
-            false
-        }
+        ItemState::Available => ui.button("Sync").clicked().then(|| Action::Sync(key())),
+        ItemState::Failed(_) => ui.button("Retry").clicked().then(|| Action::Sync(key())),
+        ItemState::OnLoan { .. } => ui.button("Return").clicked().then(|| Action::Return(key())),
         ItemState::Synced | ItemState::Returned | ItemState::Local => {
-            ui.add_enabled(false, egui::Button::new("Show in folder"));
-            false
+            let folder = item.folder.as_ref();
+            ui.add_enabled(folder.is_some(), egui::Button::new("Show in folder"))
+                .clicked()
+                .then(|| folder.cloned().map(Action::ShowInFolder))
+                .flatten()
         }
     }
 }

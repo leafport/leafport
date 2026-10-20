@@ -2,17 +2,22 @@
 mod account;
 mod jobs;
 mod list;
+mod settings_view;
 
 use eframe::egui;
-use jobs::Event;
+use jobs::{Event, Job};
 use leafport_core::{
     cloud::DownloadRecord,
-    library::{Item, ItemState, Library, Settings, Theme, load_cache, merge, paths},
+    library::{Item, ItemState, Library, Settings, load_cache, merge, paths},
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
 };
+
+/// The most banner messages kept; older ones drop off.
+const BANNER_LINES: usize = 5;
 
 pub struct App {
     pub library: Library,
@@ -20,12 +25,18 @@ pub struct App {
     pub rows: Vec<Item>,
     /// Last sync error per row key, held in memory only.
     pub failures: HashMap<String, String>,
-    /// The row whose sync worker runs (at most one).
-    pub syncing: HashSet<String>,
-    /// Row keys waiting to sync, in the order requested.
-    pub queue: VecDeque<String>,
-    pub banner: Option<String>,
+    /// The sync or import whose worker runs (at most one).
+    pub running: Option<Job>,
+    /// Syncs and imports waiting to run, in the order requested.
+    pub queue: VecDeque<Job>,
+    /// Rows whose loan return runs.
+    pub returning: HashSet<String>,
+    /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
+    pub row_errors: HashMap<String, String>,
+    /// Recent unique messages, oldest first.
+    pub banner: Vec<String>,
     pub settings: Settings,
+    settings_view: settings_view::SettingsView,
     account: account::Account,
     refreshing: bool,
     /// Bumped on sign-in and sign-out; a refresh started under an older value is stale.
@@ -35,21 +46,27 @@ pub struct App {
     rx: Receiver<Event>,
 }
 
-/// Append a message to the banner, keeping earlier ones.
-fn add_banner(banner: &mut Option<String>, message: String) {
-    match banner {
-        Some(text) => {
-            text.push('\n');
-            text.push_str(&message);
-        }
-        None => *banner = Some(message),
+/// Add a message to the banner, keeping the most recent unique ones.
+pub fn add_banner(banner: &mut Vec<String>, message: String) {
+    banner.retain(|line| *line != message);
+    banner.push(message);
+    if banner.len() > BANNER_LINES {
+        banner.drain(..banner.len() - BANNER_LINES);
     }
+}
+
+/// The startup argument, when it names an ACSM file.
+fn startup_acsm() -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::args_os().nth(1)?);
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("acsm"))
+        .then_some(path)
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut banner = None;
+        let mut banner = Vec::new();
         let settings = match paths::settings_path() {
             Some(path) => Settings::load(&path).unwrap_or_else(|e| {
                 add_banner(&mut banner, format!("Could not read settings: {e}"));
@@ -57,11 +74,8 @@ impl App {
             }),
             None => Settings::default(),
         };
-        cc.egui_ctx.set_theme(match settings.theme {
-            Theme::System => egui::ThemePreference::System,
-            Theme::Light => egui::ThemePreference::Light,
-            Theme::Dark => egui::ThemePreference::Dark,
-        });
+        cc.egui_ctx
+            .set_theme(settings_view::theme_preference(settings.theme));
         let root = settings.books_dir_or_default().unwrap_or_default();
         let library = if root.as_os_str().is_empty() {
             add_banner(&mut banner, "No books folder could be determined.".into());
@@ -97,10 +111,13 @@ impl App {
             cloud,
             rows: vec![],
             failures: HashMap::new(),
-            syncing: HashSet::new(),
+            running: None,
             queue: VecDeque::new(),
+            returning: HashSet::new(),
+            row_errors: HashMap::new(),
             banner,
             settings,
+            settings_view: settings_view::SettingsView::default(),
             account: account::Account::new(),
             refreshing: false,
             generation: 0,
@@ -111,6 +128,9 @@ impl App {
         app.remerge();
         if app.account.signed_in.is_some() {
             app.refresh(&cc.egui_ctx);
+        }
+        if let Some(path) = startup_acsm() {
+            app.enqueue_import(path, &cc.egui_ctx);
         }
         app
     }
@@ -164,6 +184,19 @@ impl App {
         self.remerge();
     }
 
+    /// Start returning the loan of the row with `key`, unless a return already runs.
+    fn start_return(&mut self, key: String, ctx: &egui::Context) {
+        if self.returning.contains(&key) {
+            return;
+        }
+        let Some(item) = self.rows.iter().find(|row| row.key == key).cloned() else {
+            return;
+        };
+        self.row_errors.remove(&key);
+        self.returning.insert(key);
+        jobs::return_loan(&self.tx, ctx, item);
+    }
+
     fn sign_out(&mut self) {
         if self.account.sign_out().is_err() {
             return;
@@ -175,7 +208,81 @@ impl App {
         // mark the remaining Local rows Failed.
         self.queue.clear();
         self.failures.clear();
+        self.row_errors.clear();
         self.remerge();
+    }
+
+    /// Save edited settings, apply the theme, and on a books folder change open the new folder.
+    fn apply_settings(&mut self, new: Settings, ctx: &egui::Context) {
+        match paths::settings_path() {
+            Some(path) => {
+                if let Err(e) = new.save(&path) {
+                    add_banner(&mut self.banner, format!("Could not save settings: {e}"));
+                }
+            }
+            None => add_banner(
+                &mut self.banner,
+                "No settings folder could be determined.".into(),
+            ),
+        }
+        ctx.set_theme(settings_view::theme_preference(new.theme));
+        let old_root = self.settings.books_dir_or_default();
+        let new_root = new.books_dir_or_default();
+        self.settings = new;
+        if new_root != old_root
+            && let Some(root) = new_root
+        {
+            self.library = Library::open(&root).unwrap_or_else(|e| {
+                add_banner(
+                    &mut self.banner,
+                    format!("Could not open {}: {e}", root.display()),
+                );
+                Library {
+                    root,
+                    local: vec![],
+                }
+            });
+            self.remerge();
+        }
+    }
+
+    fn toolbar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Import ACSM…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ACSM", &["acsm"])
+                        .pick_file()
+                {
+                    self.enqueue_import(path, ctx);
+                }
+                if ui.button("Settings").clicked() {
+                    self.settings_view.open(&self.settings);
+                }
+                if matches!(self.running, Some(Job::Import(_))) {
+                    ui.spinner();
+                    ui.weak("Importing…");
+                }
+            });
+        });
+    }
+
+    fn banner(&mut self, ctx: &egui::Context) {
+        if self.banner.is_empty() {
+            return;
+        }
+        egui::TopBottomPanel::top("banner").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.small_button("✕").clicked() {
+                    self.banner.clear();
+                }
+                ui.vertical(|ui| {
+                    for line in &self.banner {
+                        ui.colored_label(ui.visuals().warn_fg_color, line);
+                    }
+                });
+            });
+        });
     }
 
     fn handle(&mut self, event: Event, ctx: &egui::Context) {
@@ -208,10 +315,11 @@ impl App {
                 }
             }
             Event::Synced { key, result } => {
-                self.syncing.remove(&key);
+                self.running = None;
                 match result {
                     Ok(outcome) => {
                         self.failures.remove(&key);
+                        self.covers.forget(&outcome.folder);
                         if let Some(warning) = outcome.warning {
                             add_banner(&mut self.banner, warning);
                         }
@@ -222,6 +330,37 @@ impl App {
                 }
                 self.rescan();
                 self.start_next_sync(ctx);
+            }
+            Event::Imported(result) => {
+                self.running = None;
+                match result {
+                    Ok(outcome) => {
+                        self.failures.remove(&outcome.metadata.resource);
+                        self.covers.forget(&outcome.folder);
+                        if let Some(warning) = outcome.warning {
+                            add_banner(&mut self.banner, warning);
+                        }
+                    }
+                    Err(e) => add_banner(&mut self.banner, format!("Import failed: {e}")),
+                }
+                self.rescan();
+                self.start_next_sync(ctx);
+            }
+            Event::Returned { key, result } => {
+                self.returning.remove(&key);
+                match result {
+                    Ok(_) => {
+                        self.row_errors.remove(&key);
+                        let folder = self.rows.iter().find(|row| row.key == key);
+                        if let Some(folder) = folder.and_then(|row| row.folder.as_deref()) {
+                            self.covers.forget(folder);
+                        }
+                    }
+                    Err(e) => {
+                        self.row_errors.insert(key, e);
+                    }
+                }
+                self.rescan();
             }
             Event::Cover { path, image } => self.covers.insert(ctx, path, image),
         }
@@ -273,17 +412,9 @@ impl eframe::App for App {
         while let Ok(event) = self.rx.try_recv() {
             self.handle(event, ctx);
         }
+        self.toolbar(ctx);
+        self.banner(ctx);
         self.sidebar(ctx);
-        if let Some(text) = self.banner.clone() {
-            egui::TopBottomPanel::top("banner").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.small_button("✕").clicked() {
-                        self.banner = None;
-                    }
-                    ui.colored_label(ui.visuals().warn_fg_color, text);
-                });
-            });
-        }
         let mut clicked = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.account.signed_in.is_none() {
@@ -296,16 +427,34 @@ impl eframe::App for App {
                 ui.separator();
             }
             let busy = list::Busy {
-                syncing: &self.syncing,
+                running: self.running.as_ref(),
                 queue: &self.queue,
+                returning: &self.returning,
+                row_errors: &self.row_errors,
             };
             clicked = list::show(ui, &self.rows, busy, &mut self.covers, &self.tx);
         });
-        if let Some(key) = clicked {
-            self.enqueue(key, ctx);
+        match clicked {
+            Some(list::Action::Sync(key)) => self.enqueue(key, ctx),
+            Some(list::Action::Return(key)) => self.start_return(key, ctx),
+            Some(list::Action::ShowInFolder(folder)) => {
+                if let Err(e) = list::show_in_folder(&folder) {
+                    add_banner(
+                        &mut self.banner,
+                        format!("Could not open {}: {e}", folder.display()),
+                    );
+                }
+            }
+            None => {}
         }
         if self.account.open {
             self.account.window(&self.tx, ctx);
+        }
+        if self.settings_view.open {
+            let busy = self.running.is_some();
+            if let Some(new) = self.settings_view.window(ctx, &self.settings, busy) {
+                self.apply_settings(new, ctx);
+            }
         }
     }
 }

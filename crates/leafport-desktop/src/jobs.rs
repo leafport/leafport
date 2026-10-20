@@ -3,12 +3,21 @@
 use eframe::egui;
 use leafport_core::{
     cloud::DownloadRecord,
-    library::{self, SyncOutcome},
+    library::{self, Item, Metadata, SyncOutcome},
     service::ServiceClient,
     store::{ActivationState, DEFAULT_ACCOUNT, KeyringStore},
     vendors::VendorCatalog,
 };
 use std::{path::PathBuf, sync::mpsc::Sender};
+
+/// Work for the one-at-a-time sync slot.
+#[derive(Clone, PartialEq)]
+pub enum Job {
+    /// Sync the row with this key.
+    Sync(String),
+    /// Import the ACSM file at this path.
+    Import(PathBuf),
+}
 
 use crate::App;
 
@@ -28,6 +37,13 @@ pub enum Event {
     Synced {
         key: String,
         result: Result<SyncOutcome, String>,
+    },
+    /// A completed import of an ACSM file.
+    Imported(Result<SyncOutcome, String>),
+    /// A completed loan return of the row with `key`.
+    Returned {
+        key: String,
+        result: Result<Metadata, String>,
     },
     /// A decoded cover thumbnail, or None when it could not be read.
     Cover {
@@ -106,46 +122,93 @@ pub fn cover(tx: &Sender<Event>, ctx: &egui::Context, path: PathBuf) {
     );
 }
 
+/// Return the loaned `item` to its operator.
+pub fn return_loan(tx: &Sender<Event>, ctx: &egui::Context, item: Item) {
+    let key = item.key.clone();
+    spawn(
+        tx,
+        ctx,
+        move || {
+            let activation = load_activation()?;
+            let client = ServiceClient::new().map_err(|e| e.to_string())?;
+            library::return_loan(&item, &activation, &client).map_err(|e| e.to_string())
+        },
+        move |result| Event::Returned { key, result },
+    );
+}
+
 impl App {
     /// Queue a sync of the row with `key`, unless it is already queued or syncing.
     pub fn enqueue(&mut self, key: String, ctx: &egui::Context) {
-        if self.syncing.contains(&key) || self.queue.contains(&key) {
+        self.enqueue_job(Job::Sync(key), ctx);
+    }
+
+    /// Queue an import of the ACSM file at `path`. Signed out, nothing runs.
+    pub fn enqueue_import(&mut self, path: PathBuf, ctx: &egui::Context) {
+        if self.account.signed_in.is_none() {
+            crate::add_banner(&mut self.banner, "Sign in before importing an ACSM.".into());
             return;
         }
-        self.queue.push_back(key);
+        self.enqueue_job(Job::Import(path), ctx);
+    }
+
+    fn enqueue_job(&mut self, job: Job, ctx: &egui::Context) {
+        if self.running.as_ref() == Some(&job) || self.queue.contains(&job) {
+            return;
+        }
+        self.queue.push_back(job);
         self.start_next_sync(ctx);
     }
 
-    /// Start the front queued sync when no sync worker runs.
+    /// Start the front queued job when no sync or import worker runs.
     pub fn start_next_sync(&mut self, ctx: &egui::Context) {
-        if !self.syncing.is_empty() {
+        if self.running.is_some() {
             return;
         }
-        let Some(key) = self.queue.pop_front() else {
+        let Some(job) = self.queue.pop_front() else {
             return;
         };
-        let acsm = self
-            .rows
-            .iter()
-            .find(|row| row.key == key)
-            .and_then(|row| row.acsm.clone());
         let library = self.library.clone();
-        self.syncing.insert(key.clone());
-        spawn(
-            &self.tx,
-            ctx,
-            move || {
-                let acsm = acsm.ok_or_else(|| "no ACSM for this item".to_string())?;
-                if library.root.as_os_str().is_empty() {
-                    return Err("no books folder configured".into());
-                }
-                let activation = load_activation()?;
-                let client = ServiceClient::new().map_err(|e| e.to_string())?;
-                library
-                    .sync_item(&acsm, &activation, &client)
-                    .map_err(|e| e.to_string())
-            },
-            move |result| Event::Synced { key, result },
-        );
+        self.running = Some(job.clone());
+        match job {
+            Job::Sync(key) => {
+                let acsm = self
+                    .rows
+                    .iter()
+                    .find(|row| row.key == key)
+                    .and_then(|row| row.acsm.clone());
+                spawn(
+                    &self.tx,
+                    ctx,
+                    move || {
+                        let acsm = acsm.ok_or_else(|| "no ACSM for this item".to_string())?;
+                        if library.root.as_os_str().is_empty() {
+                            return Err("no books folder configured".into());
+                        }
+                        let activation = load_activation()?;
+                        let client = ServiceClient::new().map_err(|e| e.to_string())?;
+                        library
+                            .sync_item(&acsm, &activation, &client)
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| Event::Synced { key, result },
+                );
+            }
+            Job::Import(path) => spawn(
+                &self.tx,
+                ctx,
+                move || {
+                    if library.root.as_os_str().is_empty() {
+                        return Err("no books folder configured".into());
+                    }
+                    let activation = load_activation()?;
+                    let client = ServiceClient::new().map_err(|e| e.to_string())?;
+                    library
+                        .import_acsm(&path, &activation, &client)
+                        .map_err(|e| e.to_string())
+                },
+                Event::Imported,
+            ),
+        }
     }
 }
