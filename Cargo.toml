@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/leafport-core", "crates/leafport-cli", "crates/leafport-desktop", "crates/leafport-reader"]
+members = ["crates/leafport-core", "crates/leafport-cli", "crates/leafport-desktop"]
 resolver = "3"
 
 [workspace.package]

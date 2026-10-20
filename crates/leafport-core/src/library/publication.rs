@@ -355,18 +355,18 @@ fn pdfium() -> Option<&'static Pdfium> {
 /// executable, or the system library. Returns a bound Pdfium.
 fn load_pdfium() -> Option<Pdfium> {
     // 1. Explicit override.
-    if let Some(path) = std::env::var_os("LEAFPORT_PDFIUM_LIB") {
-        if let Ok(bindings) = Pdfium::bind_to_library(PathBuf::from(path)) {
-            return Some(Pdfium::new(bindings));
-        }
+    if let Some(path) = std::env::var_os("LEAFPORT_PDFIUM_LIB")
+        && let Ok(bindings) = Pdfium::bind_to_library(PathBuf::from(path))
+    {
+        return Some(Pdfium::new(bindings));
     }
     // 2. A libpdfium next to the executable (how a packaged build would ship it).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let name = Pdfium::pdfium_platform_library_name_at_path(dir);
-            if let Ok(bindings) = Pdfium::bind_to_library(&name) {
-                return Some(Pdfium::new(bindings));
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let name = Pdfium::pdfium_platform_library_name_at_path(dir);
+        if let Ok(bindings) = Pdfium::bind_to_library(&name) {
+            return Some(Pdfium::new(bindings));
         }
     }
     // 3. The system library.
