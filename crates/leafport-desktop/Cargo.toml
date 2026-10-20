@@ -2,6 +2,7 @@
 name = "leafport-desktop"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 leafport-core = { path = "../leafport-core" }
