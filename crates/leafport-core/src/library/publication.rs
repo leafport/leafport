@@ -163,7 +163,8 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
             .by_index_raw(index)
             .map_err(io::Error::from)?
             .name()
-            .to_owned();
+            .map_err(io::Error::from)?
+            .into_owned();
         match name.as_str() {
             "mimetype" | RIGHTS => {}
             ENCRYPTION => {

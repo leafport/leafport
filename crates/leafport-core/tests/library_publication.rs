@@ -114,7 +114,7 @@ fn adept_epub_decrypts_to_a_plain_epub() {
     let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
     {
         let first = zip.by_index(0).unwrap();
-        assert_eq!(first.name(), "mimetype");
+        assert_eq!(first.name().unwrap(), "mimetype");
         assert_eq!(first.compression(), zip::CompressionMethod::Stored);
     }
     assert!(zip.by_name("META-INF/rights.xml").is_err());

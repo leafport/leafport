@@ -25,7 +25,7 @@ fn rights(wrapped: &[u8]) -> String {
 fn content_key_unwraps_with_the_license_key() {
     let wrapped = common::key()
         .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &KEY)
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, &KEY)
         .unwrap();
     assert_eq!(content_key(&rights(&wrapped), common::key()).unwrap(), KEY);
 }
@@ -34,7 +34,7 @@ fn content_key_unwraps_with_the_license_key() {
 fn content_key_rejects_wrong_key_length_missing_key_and_bad_base64() {
     let short = common::key()
         .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &KEY[..8])
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, &KEY[..8])
         .unwrap();
     assert!(matches!(
         content_key(&rights(&short), common::key()),
@@ -60,7 +60,7 @@ fn content_key_rejects_wrong_key_length_missing_key_and_bad_base64() {
 fn content_key_from_another_device_fails_to_unwrap() {
     let wrapped = common::other_key()
         .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &KEY)
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, &KEY)
         .unwrap();
     assert!(matches!(
         content_key(&rights(&wrapped), common::key()),

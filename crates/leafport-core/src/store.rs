@@ -422,10 +422,8 @@ impl<S: CredentialStore> CredentialStore for ChunkedStore<S> {
     }
 }
 
-#[cfg(feature = "keyring")]
 pub use keyring_store::KeyringStore;
 
-#[cfg(feature = "keyring")]
 mod keyring_store {
     use super::{ChunkedStore, CredentialStore, StoreError};
 

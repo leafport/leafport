@@ -2,34 +2,39 @@
 name = "leafport-core"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
-
-[features]
-default = ["keyring"]
-keyring = ["dep:keyring"]
 
 [dependencies]
-keyring = { version = "3", optional = true, default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
-roxmltree.workspace = true
 reqwest.workspace = true
-sha1 = "0.10.6"
-percent-encoding = "2"
-rsa = "0.9.8"
-rand = "0.8.5"
-base64 = "0.22.1"
-zeroize = "1.8"
-x509-cert = "0.2.5"
-aes = "0.8.4"
-cbc = { version = "0.1.2", features = ["alloc"] }
-flate2 = "1.0.35"
-lopdf = "0.42"
-md-5 = "0.10.6"
-rc4 = "0.1"
+roxmltree.workspace = true
+
+aes = "0.9.3"
+base64 = "0.23.1"
+cbc = { version = "0.2.1", features = ["alloc"] }
+flate2 = "1.1.10"
+humantime = "2.4.0"
+image = {
+    version = "0.25.10",
+    default-features = false,
+    features = ["png", "jpeg"],
+}
+keyring = "4.2.0"
+lopdf = "0.46.0"
+md-5 = "0.11.0"
 p12 = "0.6.3"
-yasna = "0.5.2"
-serde = { version = "1", features = ["derive"] }
-serde_yaml_ng = "0.10"
-humantime = "2"
-zip = { version = "4.6", default-features = false, features = ["deflate"] }
-image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
 pdfium-render = { version = "0.9.4", features = ["thread_safe"] }
+percent-encoding = "2.3.2"
+rand = "0.10.3"
+rc4 = "0.2.0"
+rsa = "0.9.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_yaml_ng = "0.10.0"
+sha1 = "0.11.0"
+x509-cert = "0.3.0"
+# p12 exposes yasna 0.5 reader types in its parsing API.
+yasna = "0.5.2"
+zeroize = "1.9.1"
+zip = {
+    version = "9.0.5",
+    default-features = false,
+    features = ["deflate"],
+}

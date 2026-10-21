@@ -14,13 +14,13 @@ use leafport_core::rsa::RsaPrivateKey;
 /// One 1024-bit key per test binary; generation is slow in debug builds.
 pub fn key() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap())
+    KEY.get_or_init(|| RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap())
 }
 
 /// A second, distinct key for tests that need two identities.
 pub fn other_key() -> &'static RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
-    KEY.get_or_init(|| RsaPrivateKey::new(&mut rand::rngs::OsRng, 1024).unwrap())
+    KEY.get_or_init(|| RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap())
 }
 
 /// Verify the root signature appended by `sign_request` against `key`.
@@ -38,12 +38,14 @@ pub fn verify_signed(xml: &str, key: &RsaPrivateKey) {
 
 /// AES-128-CBC encrypt with a prepended IV, as ADEPT content uses.
 pub fn aes_encrypt(key: &[u8; 16], iv: &[u8; 16], plain: &[u8], pad: bool) -> Vec<u8> {
-    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::NoPadding, block_padding::Pkcs7};
+    use aes::cipher::{
+        BlockModeEncrypt, KeyIvInit, block_padding::NoPadding, block_padding::Pkcs7,
+    };
     let encryptor = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into());
     let ciphertext = if pad {
-        encryptor.encrypt_padded_vec_mut::<Pkcs7>(plain)
+        encryptor.encrypt_padded_vec::<Pkcs7>(plain)
     } else {
-        encryptor.encrypt_padded_vec_mut::<NoPadding>(plain)
+        encryptor.encrypt_padded_vec::<NoPadding>(plain)
     };
     let mut out = iv.to_vec();
     out.extend_from_slice(&ciphertext);
@@ -154,7 +156,7 @@ fn rights() -> String {
     use leafport_core::rsa::Pkcs1v15Encrypt;
     let wrapped = key()
         .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &KEY)
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, &KEY)
         .unwrap();
     format!(
         r#"<rights xmlns="http://ns.adobe.com/adept"><licenseToken><encryptedKey keyInfo="x">{}</encryptedKey></licenseToken></rights>"#,

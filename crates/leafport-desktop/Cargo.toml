@@ -2,15 +2,32 @@
 name = "leafport-desktop"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 
 [dependencies]
 leafport-core = { path = "../leafport-core" }
-eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-rfd = "0.17.2"
-image = { version = "0.25.5", default-features = false, features = ["png", "jpeg"] }
+
+base64 = "0.23.1"
+eframe = {
+    version = "0.37.0",
+    default-features = false,
+    features = [
+        "default_fonts",
+        "glow",
+        "wayland",
+        "x11",
+    ],
+}
+image = {
+    version = "0.25.10",
+    default-features = false,
+    features = ["png", "jpeg"],
+}
 machine-uid = "0.6.0"
-sha1 = "0.10.6"
-base64 = "0.22.1"
+rfd = "0.17.2"
+sha1 = "0.11.0"
 # Direct dependency only to enable Adwaita client-side decorations in eframe's winit on GNOME Wayland.
-winit = { version = "0.30.13", default-features = false, features = ["wayland", "wayland-csd-adwaita"] }
+winit = {
+    version = "0.30.13",
+    default-features = false,
+    features = ["wayland", "wayland-csd-adwaita"],
+}

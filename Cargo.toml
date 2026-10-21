@@ -1,12 +1,24 @@
 [workspace]
-members = ["crates/leafport-core", "crates/leafport-cli", "crates/leafport-desktop"]
 resolver = "3"
+members = [
+    "crates/leafport-core",
+    "crates/leafport-cli",
+    "crates/leafport-desktop",
+]
 
 [workspace.package]
 version = "0.1.0-dev"
 edition = "2024"
-rust-version = "1.89"
 
 [workspace.dependencies]
+reqwest = {
+    version = "0.13.5",
+    default-features = false,
+    features = [
+        "blocking",
+        "rustls",
+        "charset",
+        "system-proxy",
+    ],
+}
 roxmltree = "0.21.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "charset", "system-proxy"] }

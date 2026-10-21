@@ -170,7 +170,7 @@ pub fn decrypt_resource(
     key: &[u8; 16],
     compressed: bool,
 ) -> Result<Vec<u8>, DrmError> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
     if data.len() < 32 {
         return Err(DrmError::Truncated);
     }
@@ -179,8 +179,9 @@ pub fn decrypt_resource(
         return Err(DrmError::Misaligned);
     }
     let mut buffer = ciphertext.to_vec();
-    let plain = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.into())
-        .decrypt_padded_mut::<NoPadding>(&mut buffer)
+    let plain = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+        .map_err(|_| DrmError::Misaligned)?
+        .decrypt_padded::<NoPadding>(&mut buffer)
         .map_err(|_| DrmError::Misaligned)?;
     if !compressed {
         let pad = usize::from(*plain.last().unwrap_or(&0));

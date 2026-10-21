@@ -242,7 +242,7 @@ fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
 fn adept_license(book_key: &[u8]) -> String {
     let wrapped = common::key()
         .to_public_key()
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, book_key)
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, book_key)
         .unwrap();
     let xml = format!(
         "<rights xmlns=\"http://ns.adobe.com/adept\"><licenseToken><encryptedKey>{}\
@@ -507,10 +507,7 @@ fn unencrypted_metadata_stays_plain() {
         .unwrap();
     assert_eq!(metadata.content, XMP);
     let page_id = *document.get_pages().get(&1).unwrap();
-    assert_eq!(
-        document.get_page_content(page_id).unwrap().trim_ascii_end(),
-        CONTENT
-    );
+    assert_eq!(document.get_page_content(page_id).trim_ascii_end(), CONTENT);
 }
 
 #[test]
@@ -577,10 +574,7 @@ fn object_stream_objects_are_recovered() {
     let document = Document::load_mem(&plain).unwrap();
     assert!(document.trailer.get(b"Encrypt").is_err());
     let page_id = *document.get_pages().get(&1).unwrap();
-    assert_eq!(
-        document.get_page_content(page_id).unwrap().trim_ascii_end(),
-        CONTENT
-    );
+    assert_eq!(document.get_page_content(page_id).trim_ascii_end(), CONTENT);
     // Strings inside an object stream are covered by the container's encryption only.
     assert_eq!(
         info(&document).get(b"Title").unwrap().as_str().unwrap(),
@@ -611,10 +605,7 @@ fn assert_decrypts(encrypted: &[u8], book_key: &[u8]) {
     assert!(document.trailer.get(b"Encrypt").is_err());
     let page_id = *document.get_pages().get(&1).unwrap();
     // get_page_content re-encodes the operations, which appends a newline.
-    assert_eq!(
-        document.get_page_content(page_id).unwrap().trim_ascii_end(),
-        CONTENT
-    );
+    assert_eq!(document.get_page_content(page_id).trim_ascii_end(), CONTENT);
     assert_eq!(
         info(&document).get(b"Title").unwrap().as_str().unwrap(),
         TITLE

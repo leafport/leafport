@@ -246,15 +246,16 @@ impl App {
         }
     }
 
-    fn toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Import ACSM…").clicked()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("ACSM", &["acsm"])
                         .pick_file()
                 {
-                    self.enqueue_import(path, ctx);
+                    self.enqueue_import(path, &ctx);
                 }
                 if ui.button("Settings").clicked() {
                     self.settings_view.open(&self.settings);
@@ -267,11 +268,11 @@ impl App {
         });
     }
 
-    fn banner(&mut self, ctx: &egui::Context) {
+    fn banner(&mut self, ui: &mut egui::Ui) {
         if self.banner.is_empty() {
             return;
         }
-        egui::TopBottomPanel::top("banner").show(ctx, |ui| {
+        egui::Panel::top("banner").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.small_button("✕").clicked() {
                     self.banner.clear();
@@ -370,10 +371,11 @@ impl App {
         }
     }
 
-    fn sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("account")
-            .default_width(220.0)
-            .show(ctx, |ui| {
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        egui::Panel::left("account")
+            .default_size(220.0)
+            .show(ui, |ui| {
                 ui.heading("Leafport");
                 ui.separator();
                 match self.account.signed_in.clone() {
@@ -387,7 +389,7 @@ impl App {
                     None => {
                         ui.label("Not signed in");
                         if ui.button("Sign in").clicked() {
-                            self.account.open_window(&self.tx, ctx);
+                            self.account.open_window(&self.tx, &ctx);
                         }
                     }
                 }
@@ -398,7 +400,7 @@ impl App {
                         .add_enabled(enabled, egui::Button::new("Refresh list"))
                         .clicked()
                     {
-                        self.refresh(ctx);
+                        self.refresh(&ctx);
                     }
                     if self.refreshing {
                         ui.spinner();
@@ -412,20 +414,24 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         while let Ok(event) = self.rx.try_recv() {
             self.handle(event, ctx);
         }
-        self.toolbar(ctx);
-        self.banner(ctx);
-        self.sidebar(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.toolbar(ui);
+        self.banner(ui);
+        self.sidebar(ui);
         let mut clicked = None;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             if self.account.signed_in.is_none() {
                 ui.horizontal(|ui| {
                     ui.label("Sign in to see the books in your account.");
                     if ui.button("Sign in").clicked() {
-                        self.account.open_window(&self.tx, ctx);
+                        self.account.open_window(&self.tx, &ctx);
                     }
                 });
                 ui.separator();
@@ -439,8 +445,8 @@ impl eframe::App for App {
             clicked = list::show(ui, &self.rows, busy, &mut self.covers, &self.tx);
         });
         match clicked {
-            Some(list::Action::Sync(key)) => self.enqueue(key, ctx),
-            Some(list::Action::Return(key)) => self.start_return(key, ctx),
+            Some(list::Action::Sync(key)) => self.enqueue(key, &ctx),
+            Some(list::Action::Return(key)) => self.start_return(key, &ctx),
             Some(list::Action::ShowInFolder(folder)) => {
                 if let Err(e) = list::show_in_folder(&folder) {
                     add_banner(
@@ -452,12 +458,12 @@ impl eframe::App for App {
             None => {}
         }
         if self.account.open {
-            self.account.window(&self.tx, ctx);
+            self.account.window(&self.tx, &ctx);
         }
         if self.settings_view.open {
             let busy = self.running.is_some();
-            if let Some(new) = self.settings_view.window(ctx, &self.settings, busy) {
-                self.apply_settings(new, ctx);
+            if let Some(new) = self.settings_view.window(&ctx, &self.settings, busy) {
+                self.apply_settings(new, &ctx);
             }
         }
     }

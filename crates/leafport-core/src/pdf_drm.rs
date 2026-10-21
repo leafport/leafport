@@ -309,30 +309,15 @@ fn object_key(book_key: &[u8], id: ObjectId, cipher: Cipher) -> Vec<u8> {
     digest[..(book_key.len() + 5).min(16)].to_vec()
 }
 
-fn rc4_apply<N>(key: &[u8], data: &[u8]) -> Result<Vec<u8>, PdfDrmError>
-where
-    N: rc4::cipher::generic_array::ArrayLength<u8>,
-{
+fn rc4_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, PdfDrmError> {
     use rc4::{KeyInit, Rc4, StreamCipher};
-    let mut cipher =
-        Rc4::<N>::new_from_slice(key).map_err(|_| PdfDrmError::KeyLength(key.len()))?;
+    if !(10..=16).contains(&key.len()) {
+        return Err(PdfDrmError::KeyLength(key.len()));
+    }
+    let mut cipher = Rc4::new_from_slice(key).map_err(|_| PdfDrmError::KeyLength(key.len()))?;
     let mut buffer = data.to_vec();
     cipher.apply_keystream(&mut buffer);
     Ok(buffer)
-}
-
-fn rc4_decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, PdfDrmError> {
-    use rc4::consts::{U10, U11, U12, U13, U14, U15, U16};
-    match key.len() {
-        10 => rc4_apply::<U10>(key, data),
-        11 => rc4_apply::<U11>(key, data),
-        12 => rc4_apply::<U12>(key, data),
-        13 => rc4_apply::<U13>(key, data),
-        14 => rc4_apply::<U14>(key, data),
-        15 => rc4_apply::<U15>(key, data),
-        16 => rc4_apply::<U16>(key, data),
-        length => Err(PdfDrmError::KeyLength(length)),
-    }
 }
 
 fn decrypt_value(data: &[u8], key: &[u8], cipher: Cipher) -> Result<Vec<u8>, PdfDrmError> {
@@ -349,15 +334,16 @@ fn decrypt_value(data: &[u8], key: &[u8], cipher: Cipher) -> Result<Vec<u8>, Pdf
 }
 
 fn aes_cbc_decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, PdfDrmError> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     if data.len() < 32 || !(data.len() - 16).is_multiple_of(16) {
         return Err(PdfDrmError::Truncated);
     }
     let (iv, ciphertext) = data.split_at(16);
     let mut buffer = ciphertext.to_vec();
     // Bad padding means a wrong key or a value that was never encrypted: fail closed.
-    let plain = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+    let plain = cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+        .map_err(|_| PdfDrmError::Truncated)?
+        .decrypt_padded::<Pkcs7>(&mut buffer)
         .map_err(|_| PdfDrmError::Decrypt("invalid AES padding".into()))?;
     Ok(plain.to_vec())
 }

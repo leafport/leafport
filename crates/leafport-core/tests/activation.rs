@@ -13,10 +13,11 @@ const DEVICE_KEY: [u8; 16] = [
 ];
 
 fn unwrap_key(wrapped: &[u8]) -> Vec<u8> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     let (iv, ciphertext) = wrapped.split_at(16);
-    cbc::Decryptor::<aes::Aes128>::new((&DEVICE_KEY).into(), iv.into())
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+    cbc::Decryptor::<aes::Aes128>::new_from_slices(&DEVICE_KEY, iv)
+        .unwrap()
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .unwrap()
 }
 

@@ -7,12 +7,12 @@ use std::{error::Error, fmt};
 /// Wrap a private key for the service: a random IV followed by AES-128-CBC/PKCS#7
 /// ciphertext. Input is the exported private key, whose DER container is handled separately.
 pub fn wrap_private_key(device_key: &[u8; 16], exported_key: &[u8]) -> Vec<u8> {
-    use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
-    use rand::RngCore;
+    use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
+    use rsa::rand_core::RngCore;
     let mut iv = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut iv);
+    rsa::rand_core::OsRng.fill_bytes(&mut iv);
     let ciphertext = cbc::Encryptor::<aes::Aes128>::new(device_key.into(), (&iv).into())
-        .encrypt_padded_vec_mut::<Pkcs7>(exported_key);
+        .encrypt_padded_vec::<Pkcs7>(exported_key);
     let mut wrapped = Vec::with_capacity(16 + ciphertext.len());
     wrapped.extend_from_slice(&iv);
     wrapped.extend_from_slice(&ciphertext);
@@ -21,13 +21,14 @@ pub fn wrap_private_key(device_key: &[u8; 16], exported_key: &[u8]) -> Vec<u8> {
 
 /// Inverse of [`wrap_private_key`]: strip the IV prefix and AES-128-CBC/PKCS#7 decrypt.
 pub fn unwrap_private_key(device_key: &[u8; 16], wrapped: &[u8]) -> Option<Vec<u8>> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::Pkcs7};
     if wrapped.len() < 32 {
         return None;
     }
     let (iv, ciphertext) = wrapped.split_at(16);
-    cbc::Decryptor::<aes::Aes128>::new(device_key.into(), iv.into())
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+    cbc::Decryptor::<aes::Aes128>::new_from_slices(device_key, iv)
+        .ok()?
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .ok()
 }
 
@@ -206,7 +207,7 @@ pub fn export_private_key(key: &RsaPrivateKey) -> Result<Vec<u8>, KeyExportError
 impl ActivationKeys {
     /// RSA keys as the service expects them: 1024 bits, public exponent 65537.
     pub fn generate() -> Result<Self, rsa::errors::Error> {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rsa::rand_core::OsRng;
         Ok(Self {
             authentication: RsaPrivateKey::new(&mut rng, 1024)?,
             license: RsaPrivateKey::new(&mut rng, 1024)?,
@@ -251,7 +252,7 @@ pub fn encrypt_sign_in_data(
     plain.push(password.len() as u8);
     plain.extend_from_slice(password.as_bytes());
     let result = service_key
-        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, &plain)
+        .encrypt(&mut rsa::rand_core::OsRng, Pkcs1v15Encrypt, &plain)
         .map_err(SignInDataError::Crypto);
     // The caller owns the original credentials. Wipe our temporary packed copy.
     use zeroize::Zeroize;
@@ -346,8 +347,8 @@ pub fn service_certificate_key(certificate: &str) -> Result<RsaPublicKey, KeyExp
     let certificate =
         Certificate::from_der(&der).map_err(|error| KeyExportError(error.to_string()))?;
     let spki = certificate
-        .tbs_certificate
-        .subject_public_key_info
+        .tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .map_err(|error| KeyExportError(error.to_string()))?;
     RsaPublicKey::from_public_key_der(&spki).map_err(|error| KeyExportError(error.to_string()))
@@ -438,9 +439,9 @@ pub fn perform_sign_in(
 /// Generate a fresh 16-byte device key from OS randomness, persisted with the
 /// activation state so the signed-in device stays stable across restarts.
 pub fn generate_device_key() -> [u8; 16] {
-    use rand::RngCore;
+    use rsa::rand_core::RngCore;
     let mut device_key = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut device_key);
+    rsa::rand_core::OsRng.fill_bytes(&mut device_key);
     device_key
 }
 

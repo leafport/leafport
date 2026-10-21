@@ -85,7 +85,7 @@ pub fn sign(
     key: &RsaPrivateKey,
 ) -> Result<Vec<u8>, rsa::errors::Error> {
     key.sign_with_rng(
-        &mut rand::rngs::OsRng,
+        &mut rsa::rand_core::OsRng,
         Pkcs1v15Sign::new_unprefixed(),
         &crate::infoset::digest(element),
     )
