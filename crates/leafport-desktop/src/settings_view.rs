@@ -20,7 +20,7 @@ fn theme_label(theme: Theme) -> &'static str {
     }
 }
 
-/// The open Settings window and its unsaved edits.
+/// The open Settings window and its current edits.
 #[derive(Default)]
 pub struct SettingsView {
     pub open: bool,
@@ -34,15 +34,14 @@ impl SettingsView {
         self.open = true;
     }
 
-    /// Draw the window. Returns the edited settings when Apply was clicked.
-    /// While `busy`, a books folder change cannot be applied.
+    /// Draw the window. Returns edited settings as soon as a control changes.
+    /// While `busy`, books folder selection is disabled.
     pub fn window(
         &mut self,
         ctx: &egui::Context,
         current: &Settings,
         busy: bool,
     ) -> Option<Settings> {
-        let mut applied = None;
         let mut open = self.open;
         egui::Window::new("Settings")
             .open(&mut open)
@@ -57,13 +56,18 @@ impl SettingsView {
                         .map(|dir| dir.display().to_string())
                         .unwrap_or_else(|| "(none)".into());
                     ui.monospace(shown);
-                    if ui.button("Choose…").clicked()
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Choose…"))
+                        .clicked()
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
                         self.draft.books_dir = Some(dir);
                     }
                 });
                 ui.weak("Existing title folders are not moved.");
+                if busy {
+                    ui.weak("The books folder can change once the running sync finishes.");
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label("Theme");
@@ -79,24 +83,8 @@ impl SettingsView {
                             }
                         });
                 });
-                ui.add_space(8.0);
-                let folder_changed =
-                    self.draft.books_dir_or_default() != current.books_dir_or_default();
-                let blocked = busy && folder_changed;
-                if blocked {
-                    ui.weak("The books folder can change once the running sync finishes.");
-                }
-                ui.horizontal(|ui| {
-                    let enabled = !blocked && self.draft != *current;
-                    if ui
-                        .add_enabled(enabled, egui::Button::new("Apply"))
-                        .clicked()
-                    {
-                        applied = Some(self.draft.clone());
-                    }
-                });
             });
         self.open = open;
-        applied
+        (self.draft != *current).then(|| self.draft.clone())
     }
 }
