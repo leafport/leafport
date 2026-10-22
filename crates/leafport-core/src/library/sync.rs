@@ -16,8 +16,9 @@ use crate::fulfillment::{
 use crate::service::Transport;
 use crate::store::ActivationState;
 
-/// Device type sent with fulfillment requests.
-const DEVICE_TYPE: &str = "standalone";
+use crate::activation::{
+    CLIENT_LOCALE, CLIENT_VERSION, DEVICE_TYPE, PRODUCT_NAME, SOFTWARE_VERSION,
+};
 
 /// Result of syncing one title into the books folder.
 #[derive(Clone, Debug)]
@@ -29,17 +30,16 @@ pub struct SyncOutcome {
 
 /// The target device descriptor sent with fulfillment requests.
 pub fn target_descriptor(activation: &ActivationState) -> DeviceDescriptor {
-    // Device identity from the stored activation: the persisted device id and
-    // fingerprint, plus the device's activation token (user + device). A live
-    // operator may still reject the fingerprint.
+    // Use the same device profile that was registered by /Activate. In particular,
+    // activation.device is the server-issued UUID, not the provisional local ID.
     DeviceDescriptor {
         role: DeviceRole::Target,
-        software_version: None,
+        software_version: Some(SOFTWARE_VERSION.into()),
         client_os: Some(std::env::consts::OS.to_string()),
-        client_locale: None,
-        client_version: None,
+        client_locale: Some(CLIENT_LOCALE.into()),
+        client_version: Some(CLIENT_VERSION.into()),
         device_type: DEVICE_TYPE.into(),
-        product_name: Some("leafport".into()),
+        product_name: Some(PRODUCT_NAME.into()),
         device_name: None,
         fingerprint: activation.fingerprint.clone(),
         activations: vec![ActivationToken {
@@ -61,7 +61,7 @@ impl Library {
     pub fn sync_item(
         &self,
         acsm: &[u8],
-        activation: &ActivationState,
+        activation: &mut ActivationState,
         transport: &dyn Transport,
     ) -> Result<SyncOutcome, LibraryError> {
         self.sync_with_source(acsm, Source::Cloud, activation, transport)
@@ -71,7 +71,7 @@ impl Library {
     pub fn import_acsm(
         &self,
         path: &Path,
-        activation: &ActivationState,
+        activation: &mut ActivationState,
         transport: &dyn Transport,
     ) -> Result<SyncOutcome, LibraryError> {
         let mut bytes = Vec::new();
@@ -132,20 +132,41 @@ impl Library {
         &self,
         acsm_bytes: &[u8],
         source: Source,
-        activation: &ActivationState,
+        activation: &mut ActivationState,
         transport: &dyn Transport,
     ) -> Result<SyncOutcome, LibraryError> {
         let summary = acsm_summary(acsm_bytes)?;
         let acsm = Acsm::parse(String::from_utf8_lossy(acsm_bytes).into_owned())?;
-        let fulfilled = fulfillment::perform_fulfillment(
-            transport,
-            &acsm,
-            &activation.user,
-            &activation.device,
-            DEVICE_TYPE,
-            std::slice::from_ref(&target_descriptor(activation)),
-            &activation.keys.authentication,
-        )?;
+        fulfillment::prepare_operator(transport, activation, &acsm)?;
+        let fulfill = |state: &ActivationState| {
+            fulfillment::perform_fulfillment(
+                transport,
+                &acsm,
+                &state.user,
+                &state.device,
+                DEVICE_TYPE,
+                std::slice::from_ref(&target_descriptor(state)),
+                &state.keys.authentication,
+            )
+        };
+        let result = fulfill(activation);
+        // An operator needs reinitializing on this specific rejection.
+        // Transport failures and unrelated service errors must never replay a token.
+        let unknown_user = matches!(
+            &result,
+            Err(fulfillment::FulfillError::Response(
+                fulfillment::FulfillResponseError::Service { xml }
+            )) if cloud::adept_error_data(xml).is_some_and(|data| data.starts_with("E_LIC_USER_UNKNOWN"))
+        );
+        let fulfilled = if unknown_user {
+            activation.operator_urls.retain(|url| {
+                url.trim_end_matches('/') != acsm.operator_url().trim_end_matches('/')
+            });
+            fulfillment::prepare_operator(transport, activation, &acsm)?;
+            fulfill(activation)?
+        } else {
+            result?
+        };
         let f = fulfilled.fulfillment;
         let body = fulfilled.body;
 

@@ -72,3 +72,34 @@ fn oversized_dtd_and_malformed_input_are_rejected() {
         Err(RequestSigningError::Xml(_))
     ));
 }
+
+#[test]
+fn nonce_is_native_time_then_counter() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let first = STANDARD.decode(leafport_core::signing::nonce()).unwrap();
+    let second = STANDARD.decode(leafport_core::signing::nonce()).unwrap();
+    assert_eq!(first.len(), 12);
+    // The time half is fixed per process; only the counter advances.
+    assert_eq!(first[..8], second[..8]);
+    let time = u64::from_le_bytes(first[..8].try_into().unwrap());
+    // Milliseconds since the Adobe epoch (year 0): the Unix time plus 62_167_219_200_000.
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(time <= unix + 62_167_219_200_000);
+    assert!(time + 3_600_000 > unix + 62_167_219_200_000);
+    let a = u32::from_le_bytes(first[8..].try_into().unwrap());
+    let b = u32::from_le_bytes(second[8..].try_into().unwrap());
+    assert!(b > a);
+}
+
+#[test]
+fn expiration_is_a_utc_second_precision_date() {
+    let value = leafport_core::signing::expiration();
+    assert_eq!(value.len(), "2026-10-21T21:00:00Z".len());
+    assert!(value.ends_with('Z'));
+    let at = humantime::parse_rfc3339(&value).unwrap();
+    let ahead = at.duration_since(std::time::SystemTime::now()).unwrap();
+    assert!(ahead.as_secs() > 29 * 60 && ahead.as_secs() <= 30 * 60);
+}

@@ -481,6 +481,7 @@ pub fn parse_fulfillment(xml: &str) -> Result<Fulfillment, FulfillResponseError>
 
 #[derive(Debug)]
 pub enum FulfillError {
+    Authorization(String),
     Build(crate::signing::RequestSigningError),
     Transport(crate::service::ServiceError),
     Http {
@@ -500,6 +501,7 @@ pub enum FulfillError {
 impl fmt::Display for FulfillError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Authorization(error) => write!(f, "provider authorization failed: {error}"),
             Self::Build(error) => error.fmt(f),
             Self::Transport(error) => error.fmt(f),
             Self::Http { status, .. } => write!(f, "fulfillment HTTP request failed: {status}"),
@@ -513,6 +515,185 @@ impl fmt::Display for FulfillError {
     }
 }
 impl Error for FulfillError {}
+
+/// Initialize an authenticated operator before its first fulfillment on this device:
+/// send the credential certificates to `/Auth`, then register the operator with the
+/// activation service via `/InitLicenseService`.
+/// The caller must persist changed activation state, even if the later download fails.
+pub fn prepare_operator(
+    client: &dyn crate::service::Transport,
+    state: &mut crate::store::ActivationState,
+    acsm: &Acsm,
+) -> Result<bool, FulfillError> {
+    let operator = acsm.operator_url().trim_end_matches('/');
+    let document = roxmltree::Document::parse(acsm.document_xml())
+        .map_err(|e| FulfillError::Authorization(e.to_string()))?;
+    let anonymous = document
+        .descendants()
+        .find(|n| n.has_tag_name((ADEPT, "fulfillmentToken")))
+        .is_some_and(|n| n.attribute("auth") == Some("none"));
+    if anonymous {
+        return Ok(false);
+    }
+    let token = state
+        .activation_token()
+        .ok_or_else(|| FulfillError::Authorization("device has not been activated".into()))?;
+    if token.user != state.user
+        || token.device != state.device
+        || token.fingerprint != state.fingerprint
+    {
+        return Err(FulfillError::Authorization(
+            "stored device activation does not match this account".into(),
+        ));
+    }
+    if state
+        .operator_urls
+        .iter()
+        .any(|url| url.trim_end_matches('/') == operator)
+    {
+        return Ok(false);
+    }
+    let request = operator_auth_request(state)?;
+    authorize_exchange(client, &format!("{operator}/Auth"), request, "Auth")?;
+
+    // The activation service, rather than the operator, signs this account up for
+    // future license issuance. It has its own endpoint returned by Activate.
+    require_web_url(&token.activation_url)
+        .map_err(|_| FulfillError::Authorization("invalid activation service URL".into()))?;
+    let mut request = format!(r#"<licenseServiceRequest xmlns="{ADEPT}" identity="user">"#);
+    crate::cloud::field(&mut request, "operatorURL", operator);
+    crate::cloud::field(&mut request, "nonce", &crate::signing::nonce());
+    crate::cloud::field(&mut request, "expiration", &crate::signing::expiration());
+    crate::cloud::field(&mut request, "user", &state.user);
+    request.push_str("</licenseServiceRequest>");
+    let request = crate::signing::sign_request(&request, &state.keys.authentication)
+        .map_err(FulfillError::Build)?;
+    authorize_exchange(
+        client,
+        &format!(
+            "{}/InitLicenseService",
+            token.activation_url.trim_end_matches('/')
+        ),
+        request,
+        "InitLicenseService",
+    )?;
+    state.operator_urls.push(operator.to_owned());
+    Ok(true)
+}
+
+fn authorize_exchange(
+    client: &dyn crate::service::Transport,
+    url: &str,
+    request: String,
+    operation: &str,
+) -> Result<(), FulfillError> {
+    let response = client
+        .post_adept(url, request)
+        .map_err(|e| FulfillError::Authorization(format!("{operation}: {e}")))?;
+    let xml = std::str::from_utf8(&response.body)
+        .map_err(|_| FulfillError::Authorization(format!("{operation}: response is not UTF-8")))?;
+    check_not_error(xml).map_err(|e| FulfillError::Authorization(format!("{operation}: {e}")))?;
+    if !response.status.is_success() {
+        return Err(FulfillError::Authorization(format!(
+            "{operation}: HTTP {}",
+            response.status
+        )));
+    }
+    Ok(())
+}
+
+fn operator_auth_request(state: &crate::store::ActivationState) -> Result<String, FulfillError> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use rsa::pkcs8::DecodePublicKey;
+    use x509_cert::{
+        Certificate,
+        der::{Decode, Encode},
+    };
+    use zeroize::Zeroizing;
+
+    let missing = || {
+        FulfillError::Authorization(
+            "stored credentials lack the authentication certificates; sign in again".into(),
+        )
+    };
+    let document = roxmltree::Document::parse_with_options(
+        &state.credentials_xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 50_000,
+            entity_resolver: None,
+        },
+    )
+    .map_err(|_| missing())?;
+    let text = |name| -> Option<String> {
+        let node = document
+            .descendants()
+            .find(|n| n.has_tag_name((ADEPT, name)))?;
+        let text: String = node
+            .descendants()
+            .filter(|n| n.is_text())
+            .filter_map(|n| n.text())
+            .flat_map(str::chars)
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect();
+        (!text.is_empty()).then_some(text)
+    };
+    let license = text("licenseCertificate").ok_or_else(missing)?;
+    let authentication = text("authenticationCertificate").ok_or_else(missing)?;
+    let pfx = Zeroizing::new(
+        STANDARD
+            .decode(text("pkcs12").ok_or_else(missing)?)
+            .map_err(|_| missing())?,
+    );
+    let pfx = p12::PFX::parse(&pfx).map_err(|_| missing())?;
+    let password = Zeroizing::new(
+        STANDARD
+            .encode(state.device_key)
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<u8>>(),
+    );
+    let safe = Zeroizing::new(pfx.auth_safe.data(&password).ok_or_else(missing)?);
+    // Adobe's PKCS#12 uses BER; p12's high-level certificate walker requires DER.
+    let contents = yasna::parse_ber(&safe, |r| r.collect_sequence_of(p12::ContentInfo::parse))
+        .map_err(|_| missing())?;
+    let public_key = state.keys.authentication.to_public_key();
+    let mut certificate = None;
+    for content in &contents {
+        let Some(data) = content.data(&password) else {
+            continue;
+        };
+        let data = Zeroizing::new(data);
+        let Ok(bags) = yasna::parse_ber(&data, |r| r.collect_sequence_of(p12::SafeBag::parse))
+        else {
+            continue;
+        };
+        certificate = bags
+            .iter()
+            .filter_map(|bag| bag.bag.get_x509_cert())
+            .find(|der| {
+                let Ok(cert) = Certificate::from_der(der) else {
+                    return false;
+                };
+                let Ok(spki) = cert.tbs_certificate().subject_public_key_info().to_der() else {
+                    return false;
+                };
+                rsa::RsaPublicKey::from_public_key_der(&spki).is_ok_and(|key| key == public_key)
+            });
+        if certificate.is_some() {
+            break;
+        }
+    }
+    let certificate = certificate.ok_or_else(missing)?;
+    let mut xml = format!(r#"<credentials xmlns="{ADEPT}">"#);
+    crate::cloud::field(&mut xml, "user", &state.user);
+    crate::cloud::field(&mut xml, "certificate", &STANDARD.encode(certificate));
+    crate::cloud::field(&mut xml, "licenseCertificate", &license);
+    crate::cloud::field(&mut xml, "authenticationCertificate", &authentication);
+    xml.push_str("</credentials>");
+    Ok(xml)
+}
 
 /// The fulfilled publication: the parsed fulfillment plus the downloaded book bytes.
 pub struct FulfilledBook {

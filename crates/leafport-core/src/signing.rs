@@ -103,3 +103,44 @@ pub fn verify(
         signature,
     )
 }
+
+/// Milliseconds between the Adobe epoch (year 0, proleptic Gregorian) and the Unix
+/// epoch: 0xe79747c00 seconds, scaled to milliseconds.
+const EPOCH_OFFSET_MS: u64 = 62_167_219_200_000;
+
+/// Request expiration window: 30 minutes.
+const EXPIRATION_MS: u64 = 1_800_000;
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Nonce element text: Base64 of a u64 LE time
+/// (milliseconds since the Adobe epoch, captured once per process) followed by a u32 LE
+/// counter incremented after each use.
+pub fn nonce() -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicU32, Ordering},
+    };
+    static START: OnceLock<u64> = OnceLock::new();
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let time = *START.get_or_init(|| now_unix_ms() + EPOCH_OFFSET_MS);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0u8; 12];
+    bytes[..8].copy_from_slice(&time.to_le_bytes());
+    bytes[8..].copy_from_slice(&counter.to_le_bytes());
+    STANDARD.encode(bytes)
+}
+
+/// Expiration element text: the current UTC time plus
+/// 30 minutes, as a W3C date with second precision.
+pub fn expiration() -> String {
+    let at =
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_unix_ms() + EXPIRATION_MS);
+    humantime::format_rfc3339_seconds(at).to_string()
+}

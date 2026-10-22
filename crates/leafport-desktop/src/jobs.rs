@@ -85,6 +85,58 @@ fn load_activation() -> Result<ActivationState, String> {
         .ok_or_else(|| "not signed in".to_string())
 }
 
+/// Persist registration before fulfillment, and keep successful operator setup even
+/// if the subsequent book download fails. Retrying must reuse the registered device.
+fn with_fulfillment_activation<T>(
+    work: impl FnOnce(&mut ActivationState, &ServiceClient) -> Result<T, String>,
+) -> Result<T, String> {
+    let registration = crate::account::ACTIVATION_LOCK
+        .lock()
+        .map_err(|_| "device activation lock is unavailable".to_string())?;
+    let mut state = load_activation()?;
+    let user = state.user.clone();
+    let device_key = state.device_key;
+    let credentials = state.credentials_xml.clone();
+    let client = ServiceClient::new().map_err(|e| e.to_string())?;
+    let store = KeyringStore::new();
+    let account_is_current = || {
+        load_activation().is_ok_and(|current| {
+            current.user == user
+                && current.device_key == device_key
+                && current.credentials_xml == credentials
+        })
+    };
+    if leafport_core::activation::ensure_device_activation(&client, &mut state)
+        .map_err(|e| e.to_string())?
+    {
+        if !account_is_current() {
+            return Err("account changed during device activation".into());
+        }
+        state
+            .save(&store, DEFAULT_ACCOUNT)
+            .map_err(|e| format!("could not save device activation: {e}"))?;
+    }
+    drop(registration);
+    let operators = state.operator_urls.clone();
+    let result = work(&mut state, &client);
+    if state.operator_urls != operators {
+        let _registration = crate::account::ACTIVATION_LOCK
+            .lock()
+            .map_err(|_| "device activation lock is unavailable".to_string())?;
+        // Sign-out or a replacement sign-in must not be undone by a late worker.
+        if account_is_current()
+            && let Err(error) = state.save(&store, DEFAULT_ACCOUNT)
+        {
+            let error = format!("could not save provider authorization: {error}");
+            return Err(match result {
+                Ok(_) => error,
+                Err(failure) => format!("{failure}; {error}"),
+            });
+        }
+    }
+    result
+}
+
 /// Fetch the cloud list and store it in the cache.
 pub fn refresh(tx: &Sender<Event>, ctx: &egui::Context, cache: Option<PathBuf>, generation: u64) {
     spawn(
@@ -185,11 +237,15 @@ impl App {
                         if library.root.as_os_str().is_empty() {
                             return Err("no books folder configured".into());
                         }
-                        let activation = load_activation()?;
-                        let client = ServiceClient::new().map_err(|e| e.to_string())?;
-                        library
-                            .sync_item(&acsm, &activation, &client)
-                            .map_err(|e| e.to_string())
+                        leafport_core::fulfillment::Acsm::parse(
+                            String::from_utf8_lossy(&acsm).into_owned(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        with_fulfillment_activation(|activation, client| {
+                            library
+                                .sync_item(&acsm, activation, client)
+                                .map_err(|e| e.to_string())
+                        })
                     },
                     move |result| Event::Synced { key, result },
                 );
@@ -201,11 +257,20 @@ impl App {
                     if library.root.as_os_str().is_empty() {
                         return Err("no books folder configured".into());
                     }
-                    let activation = load_activation()?;
-                    let client = ServiceClient::new().map_err(|e| e.to_string())?;
-                    library
-                        .import_acsm(&path, &activation, &client)
-                        .map_err(|e| e.to_string())
+                    // Reject unreadable or malformed imports before registering a device.
+                    use std::io::Read;
+                    let mut acsm = String::new();
+                    std::fs::File::open(&path)
+                        .map_err(|e| e.to_string())?
+                        .take(leafport_core::fulfillment::MAX_ACSM_BYTES as u64 + 1)
+                        .read_to_string(&mut acsm)
+                        .map_err(|e| e.to_string())?;
+                    leafport_core::fulfillment::Acsm::parse(acsm).map_err(|e| e.to_string())?;
+                    with_fulfillment_activation(|activation, client| {
+                        library
+                            .import_acsm(&path, activation, client)
+                            .map_err(|e| e.to_string())
+                    })
                 },
                 Event::Imported,
             ),

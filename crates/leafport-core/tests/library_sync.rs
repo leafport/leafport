@@ -53,6 +53,258 @@ fn truncated_epub() -> Vec<u8> {
     protected_epub_with(&chapter[..20], &[], &[ADEPT_DATA])
 }
 
+/// A test certificate with the supplied public key; its signature is a placeholder.
+fn auth_certificate(key: &leafport_core::rsa::RsaPrivateKey) -> Vec<u8> {
+    use leafport_core::rsa::pkcs8::EncodePublicKey;
+    let public = key.to_public_key().to_public_key_der().unwrap();
+    let algorithm = yasna::construct_der(|w| {
+        w.write_sequence(|w| {
+            w.next()
+                .write_oid(&yasna::models::ObjectIdentifier::from_slice(&[
+                    1, 2, 840, 113549, 1, 1, 11,
+                ]));
+            w.next().write_null();
+        })
+    });
+    yasna::construct_der(|w| {
+        w.write_sequence(|w| {
+            w.next().write_sequence(|w| {
+                w.next()
+                    .write_tagged(yasna::Tag::context(0), |w| w.write_u8(2));
+                w.next().write_u8(1);
+                w.next().write_der(&algorithm);
+                w.next().write_sequence(|_| {});
+                w.next().write_sequence(|w| {
+                    w.next().write_der(b"\x18\x0f20000101000000Z");
+                    w.next().write_der(b"\x18\x0f21000101000000Z");
+                });
+                w.next().write_sequence(|_| {});
+                w.next().write_der(public.as_bytes());
+            });
+            w.next().write_der(&algorithm);
+            w.next().write_bitvec_bytes(&[0], 8);
+        })
+    })
+}
+
+fn operator_activation() -> leafport_core::store::ActivationState {
+    use leafport_core::rsa::pkcs8::EncodePrivateKey;
+
+    let mut state = activation();
+    let private = state.keys.authentication.to_pkcs8_der().unwrap();
+    let pfx = p12::PFX::new(
+        &auth_certificate(&state.keys.authentication),
+        private.as_bytes(),
+        None,
+        &STANDARD.encode(state.device_key),
+        "auth",
+    )
+    .unwrap()
+    .to_der();
+    state.credentials_xml = format!(
+        r#"<credentials xmlns="http://ns.adobe.com/adept"><user>urn:uuid:user</user><pkcs12>{}</pkcs12><licenseCertificate>{}</licenseCertificate><authenticationCertificate>{}</authenticationCertificate></credentials>"#,
+        STANDARD.encode(pfx),
+        STANDARD.encode(b"LICENSE_CERT"),
+        STANDARD.encode(b"AUTH_SERVICE_CERT"),
+    );
+    state
+}
+
+#[test]
+fn sync_authorizes_a_new_operator_before_requesting_the_book() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let mut state = operator_activation();
+    let acsm = acsm_xml("urn:uuid:new-operator", "New operator")
+        .replace("op.example", "new.example")
+        .replace(
+            "<transaction>",
+            "<expiration>2000-01-01T00:00:00Z</expiration><transaction>",
+        );
+    let transport = FakeTransport::new()
+        .respond(
+            "/fulfillment/Auth",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/InitLicenseService",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:new-operator",
+                "New operator",
+                "https://dl.example/book.epub",
+                None,
+            ),
+        )
+        .respond(
+            "/book.epub",
+            200,
+            common::epub(&[("mimetype", b"application/epub+zip")]),
+        );
+
+    lib.sync_item(acsm.as_bytes(), &mut state, &transport)
+        .unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    let auth = roxmltree::Document::parse(&requests[0].1).unwrap();
+    assert!(
+        auth.root_element()
+            .has_tag_name(("http://ns.adobe.com/adept", "credentials"))
+    );
+    let cert = auth
+        .descendants()
+        .find(|n| n.has_tag_name(("http://ns.adobe.com/adept", "certificate")))
+        .unwrap();
+    assert_eq!(
+        STANDARD.decode(cert.text().unwrap()).unwrap(),
+        auth_certificate(&state.keys.authentication)
+    );
+    assert!(requests[1].1.contains("https://new.example/fulfillment"));
+    common::verify_signed(&requests[1].1, &state.keys.authentication);
+    common::verify_signed(&requests[2].1, &state.keys.authentication);
+    // Old cloud tokens are re-fulfilled without renewing or editing their expiry.
+    assert!(
+        requests[2]
+            .1
+            .contains("<expiration>2000-01-01T00:00:00Z</expiration>")
+    );
+    drop(requests);
+
+    // Successful initialization is reused, rather than repeating either auth call.
+    let no_auth = FakeTransport::new()
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:new-operator",
+                "New operator",
+                "https://dl.example/book.epub",
+                None,
+            ),
+        )
+        .respond(
+            "/book.epub",
+            200,
+            common::epub(&[("mimetype", b"application/epub+zip")]),
+        );
+    lib.sync_item(acsm.as_bytes(), &mut state, &no_auth)
+        .unwrap();
+}
+
+#[test]
+fn failed_operator_setup_never_fulfills_or_caches_the_operator() {
+    for fail_auth in [true, false] {
+        let root = tempdir();
+        let lib = Library::open(root.path()).unwrap();
+        let mut state = operator_activation();
+        let before = state.operator_urls.clone();
+        let acsm =
+            acsm_xml("urn:uuid:new-operator", "New operator").replace("op.example", "new.example");
+        let error = r#"<error xmlns="http://ns.adobe.com/adept" data="E_AUTH_REJECTED"/>"#;
+        let transport = if fail_auth {
+            FakeTransport::new().respond("/Auth", 400, error)
+        } else {
+            FakeTransport::new()
+                .respond(
+                    "/Auth",
+                    200,
+                    r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+                )
+                .respond("/InitLicenseService", 200, error)
+        };
+        let result = lib
+            .sync_item(acsm.as_bytes(), &mut state, &transport)
+            .unwrap_err();
+        assert!(result.to_string().contains("E_AUTH_REJECTED"), "{result}");
+        assert_eq!(state.operator_urls, before);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn successful_operator_setup_is_retained_after_a_download_failure() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let mut state = operator_activation();
+    let acsm =
+        acsm_xml("urn:uuid:new-operator", "New operator").replace("op.example", "new.example");
+    let transport = FakeTransport::new()
+        .respond(
+            "/Auth",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/InitLicenseService",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:new-operator",
+                "New operator",
+                "https://dl.example/book.epub",
+                None,
+            ),
+        )
+        .respond("/book.epub", 503, b"unavailable".to_vec());
+    assert!(
+        lib.sync_item(acsm.as_bytes(), &mut state, &transport)
+            .is_err()
+    );
+    assert!(
+        state
+            .operator_urls
+            .iter()
+            .any(|url| url == "https://new.example/fulfillment")
+    );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn unknown_operator_user_reauthorizes_once_before_retrying_fulfillment() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let mut state = operator_activation();
+    let acsm = acsm_xml("urn:uuid:reset-operator", "Reset operator");
+    let transport = FakeTransport::new()
+        .respond(
+            "/Fulfill",
+            400,
+            r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_USER_UNKNOWN"/>"#,
+        )
+        .respond(
+            "/Auth",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/InitLicenseService",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        // A repeated rejection must return, rather than retrying indefinitely.
+        .respond(
+            "/Fulfill",
+            400,
+            r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_USER_UNKNOWN"/>"#,
+        );
+    let error = lib
+        .sync_item(acsm.as_bytes(), &mut state, &transport)
+        .unwrap_err();
+    assert!(error.to_string().contains("E_LIC_USER_UNKNOWN"));
+    assert_eq!(transport.requests.lock().unwrap().len(), 4);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
 fn epub_with_text(text: &[u8]) -> Vec<u8> {
     protected_epub_with(&aes_encrypt(&KEY, &IV, text, true), &[], &[ADEPT_DATA])
 }
@@ -72,7 +324,7 @@ fn sync(lib: &Library, resource: &str, title: &str, loan: Option<&str>, book: Ve
             fulfillment_xml(resource, title, "https://dl.example/a.epub", loan),
         )
         .respond("/a.epub", 200, book);
-    lib.sync_item(acsm_xml(resource, title).as_bytes(), &activation(), &t)
+    lib.sync_item(acsm_xml(resource, title).as_bytes(), &mut activation(), &t)
         .unwrap();
 }
 
@@ -95,7 +347,7 @@ fn sync_item_writes_title_folder_with_decrypted_epub_acsm_and_metadata() {
     let out = lib
         .sync_item(
             acsm_xml("urn:uuid:a", "White Sand").as_bytes(),
-            &activation(),
+            &mut activation(),
             &t,
         )
         .unwrap();
@@ -208,7 +460,7 @@ fn folder_title_comes_from_fulfillment_not_acsm() {
     let out = lib
         .sync_item(
             acsm_xml("urn:uuid:a", "Shop Listing Name").as_bytes(),
-            &activation(),
+            &mut activation(),
             &t,
         )
         .unwrap();
@@ -242,7 +494,7 @@ fn folder_title_comes_from_book_metadata() {
     let out = lib
         .sync_item(
             acsm_xml("urn:uuid:a", "ACSM Title").as_bytes(),
-            &activation(),
+            &mut activation(),
             &t,
         )
         .unwrap();
@@ -330,7 +582,11 @@ fn full_id_name_taken_by_other_resource_fails_without_replacing() {
             fulfillment_xml(UUID, "White Sand", "https://dl.example/a.epub", None),
         )
         .respond("/a.epub", 200, adept_epub(KEY));
-    let result = lib.sync_item(acsm_xml(UUID, "White Sand").as_bytes(), &activation(), &t);
+    let result = lib.sync_item(
+        acsm_xml(UUID, "White Sand").as_bytes(),
+        &mut activation(),
+        &t,
+    );
     assert!(matches!(result, Err(LibraryError::Io(_))), "{result:?}");
     assert_eq!(Metadata::read(&full).unwrap().resource, "urn:uuid:y");
     assert!(full.join("keep.txt").is_file());
@@ -348,7 +604,7 @@ fn adept_error_response_leaves_nothing_and_reports_data() {
         r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_ALREADY_FULFILLED_BY_ANOTHER_USER"/>"#,
     );
     let err = lib
-        .sync_item(acsm.as_bytes(), &activation(), &t)
+        .sync_item(acsm.as_bytes(), &mut activation(), &t)
         .unwrap_err();
     assert!(
         err.to_string()
@@ -375,7 +631,7 @@ fn drm_failure_leaves_nothing() {
         .respond("/a.epub", 200, truncated_epub());
     let result = lib.sync_item(
         acsm_xml("urn:uuid:a", "White Sand").as_bytes(),
-        &activation(),
+        &mut activation(),
         &t,
     );
     assert!(matches!(result, Err(LibraryError::Drm(_))), "{result:?}");
@@ -409,7 +665,7 @@ fn failed_resync_keeps_previous_folder() {
         .respond("/a.epub", 200, truncated_epub());
     let result = lib.sync_item(
         acsm_xml("urn:uuid:a", "White Sand").as_bytes(),
-        &activation(),
+        &mut activation(),
         &t,
     );
     assert!(result.is_err());
@@ -470,7 +726,7 @@ fn import_acsm_uploads_then_syncs() {
             ),
         )
         .respond("/a.epub", 200, adept_epub(KEY));
-    let out = lib.import_acsm(&path, &activation(), &t).unwrap();
+    let out = lib.import_acsm(&path, &mut activation(), &t).unwrap();
     assert!(out.warning.is_none());
     assert_eq!(out.metadata.source, Source::Import);
     assert_eq!(Metadata::read(&out.folder).unwrap().source, Source::Import);
@@ -501,7 +757,7 @@ fn import_acsm_upload_failure_still_syncs_with_warning() {
             ),
         )
         .respond("/a.epub", 200, adept_epub(KEY));
-    let out = lib.import_acsm(&path, &activation(), &t).unwrap();
+    let out = lib.import_acsm(&path, &mut activation(), &t).unwrap();
     let warning = out.warning.unwrap();
     assert!(warning.contains("Upload to cloud failed") && warning.contains("E_UP"));
     assert!(out.folder.join("White Sand.epub").is_file());
@@ -519,7 +775,7 @@ fn import_acsm_rejects_invalid_acsm_without_upload() {
     )
     .unwrap();
     let t = FakeTransport::new();
-    assert!(lib.import_acsm(&path, &activation(), &t).is_err());
+    assert!(lib.import_acsm(&path, &mut activation(), &t).is_err());
     assert!(t.requests.lock().unwrap().is_empty());
 }
 
@@ -645,4 +901,16 @@ fn cache_missing_is_empty_and_corrupt_is_error() {
     );
     std::fs::write(root.path().join("c.xml"), "<not").unwrap();
     assert!(load_cache(&root.path().join("c.xml")).is_err());
+}
+
+#[test]
+fn stale_authentication_certificate_is_not_sent_to_the_provider() {
+    let mut state = operator_activation();
+    state.keys.authentication = common::other_key().clone();
+    let acsm = leafport_core::fulfillment::Acsm::parse(
+        acsm_xml("urn:uuid:new-operator", "New operator").replace("op.example", "new.example"),
+    )
+    .unwrap();
+    let transport = FakeTransport::new();
+    assert!(leafport_core::fulfillment::prepare_operator(&transport, &mut state, &acsm).is_err());
 }

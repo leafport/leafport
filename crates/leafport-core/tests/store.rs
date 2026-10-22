@@ -38,6 +38,8 @@ fn state() -> ActivationState {
         device: "activation://device/x".into(),
         fingerprint: "FP==".into(),
         credentials_xml: "<credentials/>".into(),
+        activation_token_xml: Some("<activationToken/>".into()),
+        operator_urls: vec!["http://a.example/f".into(), "https://b.example/f".into()],
     }
 }
 
@@ -56,7 +58,54 @@ fn state_round_trips_through_the_store() {
     assert_eq!(loaded.device, original.device);
     assert_eq!(loaded.fingerprint, original.fingerprint);
     assert_eq!(loaded.credentials_xml, original.credentials_xml);
-    assert_eq!(store.0.borrow()[DEFAULT_ACCOUNT][0], 2);
+    assert_eq!(loaded.activation_token_xml, original.activation_token_xml);
+    assert_eq!(loaded.operator_urls, original.operator_urls);
+    assert_eq!(store.0.borrow()[DEFAULT_ACCOUNT][0], 3);
+}
+
+#[test]
+fn unactivated_state_round_trips_without_token_or_operators() {
+    let store = MemoryStore::default();
+    let mut original = state();
+    original.activation_token_xml = None;
+    original.operator_urls.clear();
+    original.save(&store, "a").unwrap();
+    let loaded = ActivationState::load(&store, "a").unwrap().unwrap();
+    assert_eq!(loaded.activation_token_xml, None);
+    assert!(loaded.operator_urls.is_empty());
+}
+
+/// Split a stored blob into its length-prefixed fields after the device key.
+fn blob_fields(blob: &[u8]) -> Vec<&[u8]> {
+    let mut cursor = 17;
+    let mut fields = Vec::new();
+    while cursor < blob.len() {
+        let length = u32::from_le_bytes(blob[cursor..cursor + 4].try_into().unwrap()) as usize;
+        fields.push(&blob[cursor..cursor + 4 + length]);
+        cursor += 4 + length;
+    }
+    fields
+}
+
+#[test]
+fn version_two_blob_loads_unactivated() {
+    let store = MemoryStore::default();
+    state().save(&store, "a").unwrap();
+    let v3 = store.0.borrow()["a"].clone();
+    let fields = blob_fields(&v3);
+    assert_eq!(fields.len(), 8);
+    let mut v2 = vec![2];
+    v2.extend_from_slice(&v3[1..17]);
+    for field in &fields[..6] {
+        v2.extend_from_slice(field);
+    }
+    store.save("a", &v2).unwrap();
+
+    let loaded = ActivationState::load(&store, "a").unwrap().unwrap();
+    assert_eq!(loaded.device, "activation://device/x");
+    assert_eq!(loaded.credentials_xml, "<credentials/>");
+    assert_eq!(loaded.activation_token_xml, None);
+    assert!(loaded.operator_urls.is_empty());
 }
 
 #[test]
@@ -72,18 +121,13 @@ fn missing_account_loads_as_none() {
 fn version_one_blob_derives_device_identity_from_key() {
     let store = MemoryStore::default();
     state().save(&store, "a").unwrap();
-    // Rewrite as v1: drop the device and fingerprint fields after the user field.
-    let v2 = store.0.borrow()["a"].clone();
-    let mut cursor = 17;
-    let mut fields = Vec::new();
-    while cursor < v2.len() {
-        let length = u32::from_le_bytes(v2[cursor..cursor + 4].try_into().unwrap()) as usize;
-        fields.push(&v2[cursor..cursor + 4 + length]);
-        cursor += 4 + length;
-    }
-    assert_eq!(fields.len(), 6);
+    // Rewrite as v1: drop the device and fingerprint fields after the user field, and
+    // the v3 activation fields.
+    let v3 = store.0.borrow()["a"].clone();
+    let fields = blob_fields(&v3);
+    assert_eq!(fields.len(), 8);
     let mut v1 = vec![1];
-    v1.extend_from_slice(&v2[1..17]);
+    v1.extend_from_slice(&v3[1..17]);
     for index in [0, 1, 2, 5] {
         v1.extend_from_slice(fields[index]);
     }
@@ -102,7 +146,7 @@ fn corrupt_blobs_are_rejected() {
     let good = store.0.borrow()["a"].clone();
     for (blob, expected) in [
         (vec![], "unknown blob version"),
-        (vec![3; 40], "unknown blob version"),
+        (vec![4; 40], "unknown blob version"),
         (vec![2; 10], "missing device key"),
         (good[..19].to_vec(), "missing length prefix"),
         (good[..good.len() - 1].to_vec(), "field exceeds blob"),

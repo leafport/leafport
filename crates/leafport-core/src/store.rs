@@ -18,8 +18,9 @@ pub const DEFAULT_ACCOUNT: &str = "default";
 
 /// Blob format revision. Byte 0 of every stored secret. Version 2 adds the device
 /// identifier and fingerprint; version 1 blobs are still read and their device identity
-/// is derived from the device key on load.
-const BLOB_VERSION: u8 = 2;
+/// is derived from the device key on load. Version 3 adds the server-issued activation
+/// token and the initialized operator URLs; older blobs load without them.
+const BLOB_VERSION: u8 = 3;
 
 /// Complete activation state for one signed-in account.
 pub struct ActivationState {
@@ -29,12 +30,17 @@ pub struct ActivationState {
     pub keys: ActivationKeys,
     /// The account identifier returned by SignInDirect.
     pub user: String,
-    /// The device identifier sent in activation and fulfillment (activation://device/UUID).
+    /// The device identifier sent in fulfillment: the server-issued urn:uuid once the
+    /// device is activated, else the provisional activation://device/UUID.
     pub device: String,
     /// The device fingerprint sent in the fulfill request's device descriptor.
     pub fingerprint: String,
     /// The credential record returned by the service, retained verbatim.
     pub credentials_xml: String,
+    /// Server-issued activationToken XML from /Activate, verbatim. None until activated.
+    pub activation_token_xml: Option<String>,
+    /// Operator URLs whose license service was initialized.
+    pub operator_urls: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -112,6 +118,14 @@ impl ActivationState {
         push_field(&mut blob, self.device.as_bytes());
         push_field(&mut blob, self.fingerprint.as_bytes());
         push_field(&mut blob, self.credentials_xml.as_bytes());
+        push_field(
+            &mut blob,
+            self.activation_token_xml
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        push_field(&mut blob, self.operator_urls.join("\n").as_bytes());
         auth.zeroize();
         license.zeroize();
         Ok(blob)
@@ -121,7 +135,7 @@ impl ActivationState {
     /// device identity, which is derived from the device key for backward compatibility.
     fn from_blob(blob: &[u8]) -> Result<Self, StoreError> {
         let version = blob.first().copied();
-        if !matches!(version, Some(1) | Some(2)) {
+        if !matches!(version, Some(1..=3)) {
             return Err(StoreError::Corrupt("unknown blob version"));
         }
         if blob.len() < 1 + 16 {
@@ -136,7 +150,7 @@ impl ActivationState {
             .map_err(|error| StoreError::Key(error.to_string()))?;
         let user = String::from_utf8(take_field(&mut cursor)?.to_vec())
             .map_err(|_| StoreError::Corrupt("user is not UTF-8"))?;
-        let (device, fingerprint) = if version == Some(2) {
+        let (device, fingerprint) = if version >= Some(2) {
             let device = String::from_utf8(take_field(&mut cursor)?.to_vec())
                 .map_err(|_| StoreError::Corrupt("device is not UTF-8"))?;
             let fingerprint = String::from_utf8(take_field(&mut cursor)?.to_vec())
@@ -150,6 +164,22 @@ impl ActivationState {
         };
         let credentials_xml = String::from_utf8(take_field(&mut cursor)?.to_vec())
             .map_err(|_| StoreError::Corrupt("credentials are not UTF-8"))?;
+        let (activation_token_xml, operator_urls) = if version >= Some(3) {
+            let token = String::from_utf8(take_field(&mut cursor)?.to_vec())
+                .map_err(|_| StoreError::Corrupt("activation token is not UTF-8"))?;
+            let operators = String::from_utf8(take_field(&mut cursor)?.to_vec())
+                .map_err(|_| StoreError::Corrupt("operator URLs are not UTF-8"))?;
+            (
+                Some(token).filter(|token| !token.is_empty()),
+                operators
+                    .split('\n')
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        } else {
+            (None, Vec::new())
+        };
         // States saved before the account key was adopted hold the locally generated
         // key; the service's account license key in the credentials takes precedence.
         if let Some(account) = crate::activation::account_license_key(&credentials_xml, &device_key)
@@ -170,7 +200,16 @@ impl ActivationState {
             device,
             fingerprint,
             credentials_xml,
+            activation_token_xml,
+            operator_urls,
         })
+    }
+
+    /// The stored server-issued activation token, if the device has been activated.
+    pub fn activation_token(&self) -> Option<crate::activation::ActivationToken> {
+        self.activation_token_xml
+            .as_deref()
+            .and_then(|xml| crate::activation::parse_activation_token(xml).ok())
     }
 
     /// Persist this state under `account` in the given credential store.

@@ -190,3 +190,208 @@ fn account_auth_key_reads_pkcs12_with_base64_device_key() {
         .is_none()
     );
 }
+
+mod device_activation {
+    use super::common::{self, FakeTransport};
+    use leafport_core::activation::{
+        ACTIVATION_SERVICE_INFO, ActivationTokenError, DeviceActivationError, activate_request,
+        ensure_device_activation, parse_activation_token,
+    };
+
+    const SERVICE_INFO: &str = r#"<activationServiceInfo xmlns="http://ns.adobe.com/adept"><authURL>http://a.example/adept</authURL><userInfoURL>http://a.example/adept</userInfoURL><activationURL>https://act.example/adept</activationURL><certificate>AA==</certificate></activationServiceInfo>"#;
+
+    fn token(user: &str, fingerprint: &str) -> String {
+        format!(
+            r#"<activationToken xmlns="http://ns.adobe.com/adept"><device>urn:uuid:server-device</device><fingerprint>{fingerprint}</fingerprint><deviceType>standalone</deviceType><activationURL>http://act.example/adept</activationURL><user>{user}</user><signature>c2ln</signature></activationToken>"#
+        )
+    }
+
+    fn unactivated() -> leafport_core::store::ActivationState {
+        let mut state = common::activation();
+        state.device = "activation://device/local".into();
+        state.activation_token_xml = None;
+        state
+    }
+
+    #[test]
+    fn activate_request_follows_native_field_order_and_verifies() {
+        let signed = activate_request("urn:uuid:u", "FP=", common::key()).unwrap();
+        common::verify_signed(&signed, common::key());
+        let document = roxmltree::Document::parse(&signed).unwrap();
+        let root = document.root_element();
+        assert_eq!(root.tag_name().name(), "activate");
+        assert_eq!(root.attribute("requestType"), Some("initial"));
+        let names: Vec<&str> = root
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "fingerprint",
+                "deviceType",
+                "clientOS",
+                "clientLocale",
+                "clientVersion",
+                "targetDevice",
+                "nonce",
+                "expiration",
+                "user",
+                "signature"
+            ]
+        );
+        let target = root
+            .children()
+            .find(|node| node.has_tag_name("targetDevice"))
+            .unwrap();
+        let token = target
+            .children()
+            .find(|node| node.has_tag_name("activationToken"))
+            .unwrap();
+        // Only the user: the device has no server identity before activation.
+        assert_eq!(token.children().filter(|node| node.is_element()).count(), 1);
+        assert!(signed.contains("<deviceType>standalone</deviceType>"));
+        assert!(signed.contains("<productName>Leafport</productName>"));
+    }
+
+    #[test]
+    fn token_parses_and_keeps_root_element_verbatim() {
+        let xml = format!("<?xml version=\"1.0\"?>{}", token("urn:uuid:u", "FP="));
+        let parsed = parse_activation_token(&xml).unwrap();
+        assert_eq!(parsed.device, "urn:uuid:server-device");
+        assert_eq!(parsed.user, "urn:uuid:u");
+        assert_eq!(parsed.fingerprint, "FP=");
+        assert_eq!(parsed.device_type, "standalone");
+        assert_eq!(parsed.activation_url, "http://act.example/adept");
+        assert_eq!(parsed.xml, token("urn:uuid:u", "FP="));
+        assert_eq!(parse_activation_token(&parsed.xml).unwrap(), parsed);
+    }
+
+    #[test]
+    fn nested_token_keeps_the_whole_document_so_it_reparses() {
+        let xml = format!(
+            r#"<a:wrapper xmlns:a="http://ns.adobe.com/adept">{}</a:wrapper>"#,
+            token("urn:uuid:u", "FP=")
+                .replace(" xmlns=\"http://ns.adobe.com/adept\"", "")
+                .replace('<', "<a:")
+                .replace("<a:/", "</a:")
+        );
+        let parsed = parse_activation_token(&xml).unwrap();
+        assert_eq!(parse_activation_token(&parsed.xml).unwrap(), parsed);
+    }
+
+    #[test]
+    fn error_root_is_a_service_error() {
+        let error = parse_activation_token(
+            r#"<error xmlns="http://ns.adobe.com/adept" data="E_ACT_TOO_MANY_ACTIVATIONS"/>"#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ActivationTokenError::Service { .. }));
+        assert!(error.to_string().contains("E_ACT_TOO_MANY_ACTIVATIONS"));
+    }
+
+    #[test]
+    fn ensure_activates_once_and_adopts_the_server_device() {
+        let mut state = unactivated();
+        let transport = FakeTransport::new()
+            .respond("/ActivationServiceInfo", 200, SERVICE_INFO)
+            .respond(
+                "https://act.example/adept/Activate",
+                200,
+                token(&state.user, &state.fingerprint),
+            );
+        assert!(ensure_device_activation(&transport, &mut state).unwrap());
+        assert_eq!(state.device, "urn:uuid:server-device");
+        assert_eq!(
+            state.activation_token().unwrap().device,
+            "urn:uuid:server-device"
+        );
+        // Operators initialized under no (or another) registration do not carry over.
+        assert!(state.operator_urls.is_empty());
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests[0].0, ACTIVATION_SERVICE_INFO);
+        common::verify_signed(&requests[1].1, common::key());
+        drop(requests);
+
+        // Activated: no further network traffic.
+        assert!(!ensure_device_activation(&transport, &mut state).unwrap());
+        assert_eq!(transport.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stored_token_for_another_user_fails_without_network() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some(token("urn:uuid:someone-else", &state.fingerprint));
+        let transport = FakeTransport::new();
+        let error = ensure_device_activation(&transport, &mut state).unwrap_err();
+        assert!(matches!(error, DeviceActivationError::Mismatch("user")));
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stored_token_with_another_fingerprint_fails_without_network() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some(token(&state.user, "OTHER="));
+        let transport = FakeTransport::new();
+        let error = ensure_device_activation(&transport, &mut state).unwrap_err();
+        assert!(matches!(
+            error,
+            DeviceActivationError::Mismatch("fingerprint")
+        ));
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn corrupt_stored_token_fails_without_network() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some("<activationToken".into());
+        let transport = FakeTransport::new();
+        let error = ensure_device_activation(&transport, &mut state).unwrap_err();
+        assert!(matches!(error, DeviceActivationError::StoredToken(_)));
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_device_is_reconciled_from_stored_token_without_network() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some(token(&state.user, &state.fingerprint));
+        let operators = state.operator_urls.clone();
+        let transport = FakeTransport::new();
+        assert!(ensure_device_activation(&transport, &mut state).unwrap());
+        assert_eq!(state.device, "urn:uuid:server-device");
+        assert_eq!(state.operator_urls, operators);
+        assert!(!ensure_device_activation(&transport, &mut state).unwrap());
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mismatched_fingerprint_is_rejected_and_state_untouched() {
+        let mut state = unactivated();
+        let transport = FakeTransport::new()
+            .respond("/ActivationServiceInfo", 200, SERVICE_INFO)
+            .respond("/Activate", 200, token(&state.user, "OTHER="));
+        let error = ensure_device_activation(&transport, &mut state).unwrap_err();
+        assert!(matches!(
+            error,
+            DeviceActivationError::Mismatch("fingerprint")
+        ));
+        assert_eq!(state.device, "activation://device/local");
+        assert!(state.activation_token_xml.is_none());
+    }
+
+    #[test]
+    fn service_error_on_http_failure_is_surfaced() {
+        let mut state = unactivated();
+        let transport = FakeTransport::new()
+            .respond("/ActivationServiceInfo", 200, SERVICE_INFO)
+            .respond(
+                "/Activate",
+                403,
+                r#"<error xmlns="http://ns.adobe.com/adept" data="E_ACT_TOO_MANY_ACTIVATIONS"/>"#,
+            );
+        let error = ensure_device_activation(&transport, &mut state).unwrap_err();
+        assert!(error.to_string().contains("E_ACT_TOO_MANY_ACTIVATIONS"));
+        assert!(state.activation_token_xml.is_none());
+    }
+}

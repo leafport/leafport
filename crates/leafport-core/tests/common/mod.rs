@@ -200,6 +200,10 @@ pub fn activation() -> leafport_core::store::ActivationState {
         device: "urn:uuid:device".into(),
         fingerprint: "fingerprint".into(),
         credentials_xml: String::new(),
+        activation_token_xml: Some(
+            r#"<activationToken xmlns="http://ns.adobe.com/adept"><device>urn:uuid:device</device><fingerprint>fingerprint</fingerprint><deviceType>standalone</deviceType><activationURL>https://activation.example/adept</activationURL><user>urn:uuid:user</user><signature>test</signature></activationToken>"#.into(),
+        ),
+        operator_urls: vec!["https://op.example/fulfillment".into()],
     }
 }
 

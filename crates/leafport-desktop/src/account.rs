@@ -11,6 +11,10 @@ use std::sync::mpsc::Sender;
 
 use crate::jobs::{Event, catch_panic};
 
+/// Serializes every load, device activation and save of the stored activation state, so
+/// a sign-in and a sync never both register the device (each /Activate uses a slot).
+pub static ACTIVATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub struct Account {
     catalog: VendorCatalog,
     vendor: usize,
@@ -132,27 +136,32 @@ impl Account {
                 // Device key and activation keys are generated locally for this device.
                 // The 16-byte device key is random and persisted with the activation state.
                 // Reuse an existing activation so books fulfilled under it stay readable.
-                let (device_key, keys, device, fingerprint) = match ActivationState::load(
-                    &KeyringStore::new(),
-                    DEFAULT_ACCOUNT,
-                ) {
-                    Ok(Some(existing)) => (
-                        existing.device_key,
-                        existing.keys,
-                        existing.device,
-                        existing.fingerprint,
-                    ),
-                    Ok(None) => {
-                        let device_key = activation::generate_device_key();
-                        let keys = ActivationKeys::generate().map_err(|e| e.to_string())?;
-                        let device = activation::device_id(&device_key);
-                        let fingerprint = machine_fingerprint(&device_key);
-                        (device_key, keys, device, fingerprint)
-                    }
+                let _guard = ACTIVATION_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let existing = match ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT) {
+                    Ok(existing) => existing,
                     Err(e) => {
                         return Err(format!(
                             "credential store unreadable: {e} — not replacing existing activation"
                         ));
+                    }
+                };
+                let (device_key, keys, device, fingerprint, token, operators) = match existing {
+                    Some(existing) => (
+                        existing.device_key,
+                        existing.keys,
+                        existing.device,
+                        existing.fingerprint,
+                        existing.activation_token_xml,
+                        existing.operator_urls,
+                    ),
+                    None => {
+                        let device_key = activation::generate_device_key();
+                        let keys = ActivationKeys::generate().map_err(|e| e.to_string())?;
+                        let device = activation::device_id(&device_key);
+                        let fingerprint = machine_fingerprint(&device_key);
+                        (device_key, keys, device, fingerprint, None, Vec::new())
                     }
                 };
                 let signed = activation::perform_sign_in(
@@ -179,17 +188,40 @@ impl Account {
                 {
                     keys.authentication = authentication;
                 }
-                let state = ActivationState {
+                let mut state = ActivationState {
                     device,
                     fingerprint,
                     device_key,
                     keys,
                     user: signed.user.clone(),
                     credentials_xml: signed.credentials_xml,
+                    activation_token_xml: token,
+                    operator_urls: operators,
                 };
+                // A token issued to another account, or one that no longer parses, does not
+                // carry over. Signing in is an explicit request, so the device registers anew.
+                if state.activation_token_xml.is_some()
+                    && state
+                        .activation_token()
+                        .is_none_or(|token| token.user != state.user)
+                {
+                    state.activation_token_xml = None;
+                    state.operator_urls.clear();
+                }
+                // Keep the sign-in even if device activation fails below; the next sync
+                // retries activation.
                 state
                     .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?;
+                // Register this device with the activation service (POST /Activate) after
+                // signing in. Fulfillment requires the server-issued device.
+                if activation::ensure_device_activation(&client, &mut state)
+                    .map_err(|e| e.to_string())?
+                {
+                    state
+                        .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
+                        .map_err(|e| e.to_string())?;
+                }
                 Ok(signed.user)
             });
             // password/username were moved in and dropped here; nothing is returned.

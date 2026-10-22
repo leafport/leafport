@@ -479,3 +479,294 @@ pub fn device_fingerprint(device_key: &[u8; 16]) -> String {
     hasher.update(device_key);
     STANDARD.encode(hasher.finalize())
 }
+
+/// Public activation service description.
+pub const ACTIVATION_SERVICE_INFO: &str =
+    "https://adeactivate.adobe.com/adept/ActivationServiceInfo";
+
+/// Operation appended to the activationURL.
+pub const ACTIVATE_OPERATION: &str = "Activate";
+
+/// Device type this client activates as.
+pub const DEVICE_TYPE: &str = "standalone";
+
+/// Product name reported in the activate and fulfill requests.
+pub const PRODUCT_NAME: &str = "Leafport";
+
+/// Client and software versions reported in the activate and fulfill requests:
+/// Leafport's own version.
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CLIENT_LOCALE: &str = "en";
+
+/// Server-issued device activation, the response of /Activate (record
+/// `activationToken`: device, fingerprint, deviceType, activationURL, user, signature).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivationToken {
+    /// The server-issued device identifier (urn:uuid). Fulfillment sends this device.
+    pub device: String,
+    pub fingerprint: String,
+    pub device_type: String,
+    pub activation_url: String,
+    pub user: String,
+    /// The complete activationToken element, verbatim.
+    pub xml: String,
+}
+
+#[derive(Debug)]
+pub enum ActivationTokenError {
+    TooLarge,
+    Xml(roxmltree::Error),
+    /// ADEPT `error` root. The complete element is retained.
+    Service {
+        xml: String,
+    },
+    /// The response is not an activationToken or lacks a required field.
+    Missing(&'static str),
+}
+
+impl fmt::Display for ActivationTokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge => write!(f, "activation response exceeds the local size limit"),
+            Self::Xml(error) => write!(f, "E_ADEPT_XML_SYNTAX: {error}"),
+            Self::Service { xml } => write!(
+                f,
+                "E_ACT_SERVICE: {}",
+                crate::cloud::adept_error_data(xml).unwrap_or_else(|| "unknown error".into())
+            ),
+            Self::Missing(field) => {
+                write!(f, "E_ACT_BAD_SERVER_RESPONSE: response has no {field}")
+            }
+        }
+    }
+}
+impl Error for ActivationTokenError {}
+
+fn parse_adept(xml: &str) -> Result<roxmltree::Document<'_>, ActivationTokenError> {
+    if xml.len() > 1024 * 1024 {
+        return Err(ActivationTokenError::TooLarge);
+    }
+    let document = roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 10_000,
+            entity_resolver: None,
+        },
+    )
+    .map_err(ActivationTokenError::Xml)?;
+    if document.root_element().has_tag_name((ADEPT_NS, "error")) {
+        return Err(ActivationTokenError::Service {
+            xml: xml.to_owned(),
+        });
+    }
+    Ok(document)
+}
+
+/// Text of the first direct ADEPT child named `name`, if nonempty.
+fn child_text(node: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
+    node.children()
+        .find(|child| child.has_tag_name((ADEPT_NS, name)))
+        .and_then(|child| child.text())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Parse an /Activate response or a stored token. The activationToken element may be
+/// the root or nested under a wrapper; it is retained verbatim.
+pub fn parse_activation_token(xml: &str) -> Result<ActivationToken, ActivationTokenError> {
+    let document = parse_adept(xml)?;
+    let token = document
+        .descendants()
+        .find(|node| node.has_tag_name((ADEPT_NS, "activationToken")))
+        .ok_or(ActivationTokenError::Missing("activationToken"))?;
+    let field =
+        |name: &'static str| child_text(token, name).ok_or(ActivationTokenError::Missing(name));
+    Ok(ActivationToken {
+        device: field("device")?,
+        fingerprint: field("fingerprint")?,
+        device_type: field("deviceType")?,
+        activation_url: field("activationURL")?,
+        user: field("user")?,
+        // A nested token may depend on namespace declarations of its ancestors, so only
+        // a root token is cut out; otherwise the whole document is kept.
+        xml: if token == document.root_element() {
+            xml[token.range()].to_owned()
+        } else {
+            xml.to_owned()
+        },
+    })
+}
+
+/// Read the activationURL from an ActivationServiceInfo response.
+pub fn parse_activation_url(xml: &str) -> Result<String, ActivationTokenError> {
+    let document = parse_adept(xml)?;
+    let root = document.root_element();
+    if !root.has_tag_name((ADEPT_NS, "activationServiceInfo")) {
+        return Err(ActivationTokenError::Missing("activationServiceInfo"));
+    }
+    child_text(root, "activationURL").ok_or(ActivationTokenError::Missing("activationURL"))
+}
+
+/// URL to post the activate request to.
+pub fn activate_url(activation_url: &str) -> String {
+    format!(
+        "{}/{}",
+        activation_url.trim_end_matches('/'),
+        ACTIVATE_OPERATION
+    )
+}
+
+/// Build the signed initial activate request in protocol field order:
+/// fingerprint, deviceType, clientOS, clientLocale, clientVersion, targetDevice, nonce,
+/// expiration, user. The target device carries an activationToken naming only the user,
+/// since the device has no server identity yet.
+pub fn activate_request(
+    user: &str,
+    fingerprint: &str,
+    key: &RsaPrivateKey,
+) -> Result<String, crate::signing::RequestSigningError> {
+    use crate::cloud::field;
+    let client_os = std::env::consts::OS;
+    let mut xml = format!("<activate xmlns=\"{ADEPT_NS}\" requestType=\"initial\">");
+    field(&mut xml, "fingerprint", fingerprint);
+    field(&mut xml, "deviceType", DEVICE_TYPE);
+    field(&mut xml, "clientOS", client_os);
+    field(&mut xml, "clientLocale", CLIENT_LOCALE);
+    field(&mut xml, "clientVersion", CLIENT_VERSION);
+    xml.push_str("<targetDevice>");
+    field(&mut xml, "softwareVersion", SOFTWARE_VERSION);
+    field(&mut xml, "clientOS", client_os);
+    field(&mut xml, "clientLocale", CLIENT_LOCALE);
+    field(&mut xml, "clientVersion", CLIENT_VERSION);
+    field(&mut xml, "deviceType", DEVICE_TYPE);
+    field(&mut xml, "productName", PRODUCT_NAME);
+    field(&mut xml, "fingerprint", fingerprint);
+    xml.push_str("<activationToken>");
+    field(&mut xml, "user", user);
+    xml.push_str("</activationToken></targetDevice>");
+    field(&mut xml, "nonce", &crate::signing::nonce());
+    field(&mut xml, "expiration", &crate::signing::expiration());
+    field(&mut xml, "user", user);
+    xml.push_str("</activate>");
+    crate::signing::sign_request(&xml, key)
+}
+
+#[derive(Debug)]
+pub enum DeviceActivationError {
+    Transport(crate::service::ServiceError),
+    /// A non-success HTTP status without an ADEPT error body.
+    Http {
+        status: reqwest::StatusCode,
+    },
+    Utf8(std::string::FromUtf8Error),
+    Build(crate::signing::RequestSigningError),
+    Response(ActivationTokenError),
+    /// The service activated a different user or fingerprint than requested, or the
+    /// stored token belongs to another user or fingerprint.
+    Mismatch(&'static str),
+    /// The stored activation token no longer parses. It is not replaced silently,
+    /// since a new activation uses another of the account's device slots.
+    StoredToken(ActivationTokenError),
+}
+
+impl fmt::Display for DeviceActivationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(f, "device activation failed: {error}"),
+            Self::Http { status } => write!(f, "device activation HTTP request failed: {status}"),
+            Self::Utf8(error) => write!(f, "activation response is not UTF-8: {error}"),
+            Self::Build(error) => write!(f, "building the activate request failed: {error}"),
+            Self::Response(error) => write!(f, "device activation failed: {error}"),
+            Self::Mismatch(field) => {
+                write!(f, "device activation token is for another {field}")
+            }
+            Self::StoredToken(error) => write!(f, "stored device activation is unusable: {error}"),
+        }
+    }
+}
+impl Error for DeviceActivationError {}
+
+/// Turn a response into UTF-8 text, surfacing an ADEPT error body on HTTP failure.
+fn response_text(response: crate::service::AdeptResponse) -> Result<String, DeviceActivationError> {
+    let success = response.status.is_success();
+    let status = response.status;
+    let text = String::from_utf8(response.body).map_err(DeviceActivationError::Utf8);
+    if !success {
+        if let Ok(xml) = &text
+            && let Err(error @ ActivationTokenError::Service { .. }) = parse_adept(xml)
+        {
+            return Err(DeviceActivationError::Response(error));
+        }
+        return Err(DeviceActivationError::Http { status });
+    }
+    text
+}
+
+/// Register this device with the activation service (POST <activationURL>/Activate) and
+/// return the server-issued token. The token's user and fingerprint must match the
+/// request. The caller persists the result.
+pub fn perform_activate(
+    transport: &dyn crate::service::Transport,
+    activation_url: &str,
+    state: &crate::store::ActivationState,
+) -> Result<ActivationToken, DeviceActivationError> {
+    let request = activate_request(&state.user, &state.fingerprint, &state.keys.authentication)
+        .map_err(DeviceActivationError::Build)?;
+    let response = transport
+        .post_adept(&activate_url(activation_url), request)
+        .map_err(DeviceActivationError::Transport)?;
+    let token = parse_activation_token(&response_text(response)?)
+        .map_err(DeviceActivationError::Response)?;
+    if token.user != state.user {
+        return Err(DeviceActivationError::Mismatch("user"));
+    }
+    if token.fingerprint != state.fingerprint {
+        return Err(DeviceActivationError::Mismatch("fingerprint"));
+    }
+    Ok(token)
+}
+
+/// Make sure the device holds a server-issued activation for the signed-in user.
+///
+/// With a stored token no request is sent. The token must parse and match the state's
+/// user and fingerprint, or this fails without touching the network. A stale
+/// `state.device` is corrected to the token's device (`Ok(true)`); otherwise nothing
+/// changes (`Ok(false)`).
+///
+/// Without a token the activationURL is discovered from ActivationServiceInfo, the device
+/// is activated, the token and its device identifier are written into `state`, and the
+/// operator list is reset (`Ok(true)`). Whenever this returns `Ok(true)` the caller must
+/// persist `state` right away: each activation uses one of the account's device slots.
+pub fn ensure_device_activation(
+    transport: &dyn crate::service::Transport,
+    state: &mut crate::store::ActivationState,
+) -> Result<bool, DeviceActivationError> {
+    if let Some(xml) = &state.activation_token_xml {
+        let token = parse_activation_token(xml).map_err(DeviceActivationError::StoredToken)?;
+        if token.user != state.user {
+            return Err(DeviceActivationError::Mismatch("user"));
+        }
+        if token.fingerprint != state.fingerprint {
+            return Err(DeviceActivationError::Mismatch("fingerprint"));
+        }
+        if token.device == state.device {
+            return Ok(false);
+        }
+        state.device = token.device;
+        return Ok(true);
+    }
+    let info = transport
+        .fetch(ACTIVATION_SERVICE_INFO, 1024 * 1024)
+        .map_err(DeviceActivationError::Transport)?;
+    let activation_url =
+        parse_activation_url(&response_text(info)?).map_err(DeviceActivationError::Response)?;
+    let token = perform_activate(transport, &activation_url, state)?;
+    state.device = token.device.clone();
+    state.activation_token_xml = Some(token.xml);
+    // Operators were initialized for an earlier registration, if any.
+    state.operator_urls.clear();
+    Ok(true)
+}
