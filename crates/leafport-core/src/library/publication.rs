@@ -129,7 +129,7 @@ fn decrypt_epub(
         })?;
     let key = drm::content_key(&rights, license_key).map_err(drm_error)?;
     // Match CipherReference URIs to archive paths by percent-decoding them.
-    let listed: Vec<(String, String, bool)> = drm::encrypted_resources(&encryption)
+    let listed: Vec<(String, String, bool, Option<usize>)> = drm::encrypted_resources(&encryption)
         .map_err(drm_error)?
         .into_iter()
         .map(|resource| {
@@ -137,12 +137,12 @@ fn decrypt_epub(
                 .decode_utf8()
                 .map(|s| s.into_owned())
                 .unwrap_or_else(|_| resource.uri.clone());
-            (decoded, resource.uri, resource.compressed)
+            (decoded, resource.uri, resource.compressed, resource.size)
         })
         .collect();
-    let resources: HashMap<&str, bool> = listed
+    let resources: HashMap<&str, (bool, Option<usize>)> = listed
         .iter()
-        .map(|(decoded, _, compressed)| (decoded.as_str(), *compressed))
+        .map(|(decoded, _, compressed, size)| (decoded.as_str(), (*compressed, *size)))
         .collect();
     // The listed resources that were decrypted. One without an entry would leave the
     // book with ciphertext whose encryption.xml entry is stripped.
@@ -185,13 +185,23 @@ fn decrypt_epub(
                 }
             }
             _ => match resources.get(name.as_str()) {
-                Some(&compressed) => {
+                Some(&(compressed, size)) => {
                     matched.insert(name.clone());
                     let file = zip.by_index(index).map_err(io::Error::from)?;
                     let raw = read_limited(file, MAX_OUTPUT_BYTES - total)
                         .ok_or_else(|| invalid(format!("{name}: entry too large")))?;
-                    let plain = drm::decrypt_resource(&raw, &key, compressed)
+                    let mut plain = drm::decrypt_resource(&raw, &key, compressed)
                         .map_err(|e| LibraryError::Drm(format!("{name}: {e}")))?;
+                    // Without a Compression element, a resource whose decrypted length
+                    // differs from its ResourceSize is deflated if it inflates to it.
+                    if !compressed
+                        && let Some(size) = size
+                        && plain.len() != size
+                        && let Ok(inflated) = drm::inflate(&plain)
+                        && inflated.len() == size
+                    {
+                        plain = inflated;
+                    }
                     add(&mut total, plain.len())?;
                     out.start_file(name.as_str(), deflated)
                         .map_err(io::Error::from)?;
@@ -205,7 +215,7 @@ fn decrypt_epub(
             },
         }
     }
-    if let Some((_, uri, _)) = listed
+    if let Some((_, uri, _, _)) = listed
         .iter()
         .find(|(decoded, ..)| !matched.contains(decoded))
     {

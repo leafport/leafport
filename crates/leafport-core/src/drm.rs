@@ -90,12 +90,16 @@ pub fn content_key(rights_xml: &str, license_key: &RsaPrivateKey) -> Result<[u8;
         .map_err(|_| DrmError::KeyLength(key.len()))
 }
 
-/// One encrypted-resource record from encryption.xml: the archive path and whether the
-/// plaintext is raw-deflate compressed (ADEPT Compression Method="8").
+/// One encrypted-resource record from encryption.xml: the archive path, whether the
+/// plaintext is raw-deflate compressed (ADEPT Compression Method="8"), and the
+/// original resource size when listed.
 #[derive(Clone, Debug)]
 pub struct EncryptedResource {
     pub uri: String,
     pub compressed: bool,
+    /// `ResourceSize`: the length of the original, uncompressed resource. Google's
+    /// EPUBs deflate every resource but list only this, with no Compression element.
+    pub size: Option<usize>,
 }
 
 fn parse_encryption(encryption_xml: &str) -> Result<roxmltree::Document<'_>, DrmError> {
@@ -152,9 +156,15 @@ pub fn encrypted_resources(encryption_xml: &str) -> Result<Vec<EncryptedResource
             .find(|node| node.has_tag_name((ADEPT, "Compression")))
             .and_then(|node| node.attribute("Method"))
             .is_some_and(|method| method == "8");
+        let size = data
+            .descendants()
+            .find(|node| node.tag_name().name() == "ResourceSize")
+            .and_then(|node| node.text())
+            .and_then(|text| text.trim().parse().ok());
         resources.push(EncryptedResource {
             uri: uri.to_owned(),
             compressed,
+            size,
         });
     }
     Ok(resources)
@@ -197,6 +207,12 @@ pub fn decrypt_resource(
         };
         return Ok(plain[..end].to_vec());
     }
+    inflate(plain)
+}
+
+/// Raw-inflate a decrypted resource, capped at MAX_RESOURCE_BYTES. Trailing bytes after
+/// the self-terminating stream, such as padding, are ignored.
+pub fn inflate(plain: &[u8]) -> Result<Vec<u8>, DrmError> {
     use std::io::Read;
     let mut output = Vec::with_capacity(plain.len() * 3);
     flate2::read::DeflateDecoder::new(plain)

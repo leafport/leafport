@@ -177,6 +177,39 @@ fn compressed_adept_chapter_decrypts_to_plaintext() {
     assert!(zip.by_name("META-INF/encryption.xml").is_err());
 }
 
+/// Encryption entry shaped like Google's ADEPT EPUBs: no adept:Compression element,
+/// only the plaintext's ResourceSize.
+fn sized_data(size: usize) -> String {
+    format!(
+        r#"<enc:EncryptedData>
+        <enc:EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>
+        <enc:CipherData><enc:CipherReference URI="OEBPS/ch%31.xhtml"/></enc:CipherData>
+        <enc:EncryptionProperties><enc:ResourceSize>{size}</enc:ResourceSize></enc:EncryptionProperties>
+    </enc:EncryptedData>"#
+    )
+}
+
+#[test]
+fn deflated_chapter_without_compression_element_is_inflated_to_its_resource_size() {
+    use std::io::Write;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    deflate.write_all(CHAPTER).unwrap();
+    let chapter = common::aes_encrypt(&KEY, &common::IV, &deflate.finish().unwrap(), true);
+    let source = common::protected_epub_with(&chapter, &[], &[&sized_data(CHAPTER.len())]);
+    let out = decrypt_publication(&source, Format::Epub, None, common::key()).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
+    assert_eq!(read(&mut zip, "OEBPS/ch1.xhtml"), CHAPTER);
+}
+
+#[test]
+fn uncompressed_chapter_with_resource_size_is_kept_as_decrypted() {
+    let chapter = common::aes_encrypt(&KEY, &common::IV, CHAPTER, true);
+    let source = common::protected_epub_with(&chapter, &[], &[&sized_data(CHAPTER.len())]);
+    let out = decrypt_publication(&source, Format::Epub, None, common::key()).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
+    assert_eq!(read(&mut zip, "OEBPS/ch1.xhtml"), CHAPTER);
+}
+
 #[test]
 fn adept_resource_missing_from_archive_is_a_drm_error() {
     let missing = r#"<enc:EncryptedData>
