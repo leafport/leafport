@@ -11,6 +11,7 @@ eframe = {
     version = "0.37.0",
     default-features = false,
     features = [
+        "clipboard",
         "default_fonts",
         "glow",
         "wayland",
