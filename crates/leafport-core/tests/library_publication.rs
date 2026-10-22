@@ -109,6 +109,23 @@ fn epub_without_cover() -> Vec<u8> {
 }
 
 #[test]
+fn adept_epub_without_rights_decrypts_with_the_fulfillment_license_token() {
+    let rights = common::rights();
+    let start = rights.find("<licenseToken>").unwrap();
+    let end = rights.find("</rights>").unwrap();
+    let token = rights[start..end].replacen(
+        "<licenseToken>",
+        r#"<licenseToken xmlns="http://ns.adobe.com/adept">"#,
+        1,
+    );
+    let source = common::adept_epub_without_rights(KEY);
+    let out = decrypt_publication(&source, Format::Epub, Some(&token), common::key()).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
+    assert!(zip.by_name("META-INF/encryption.xml").is_err());
+    assert_eq!(read(&mut zip, "OEBPS/ch1.xhtml"), CHAPTER);
+}
+
+#[test]
 fn adept_epub_decrypts_to_a_plain_epub() {
     let out = decrypt_publication(&adept_epub(KEY), Format::Epub, None, common::key()).unwrap();
     let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();

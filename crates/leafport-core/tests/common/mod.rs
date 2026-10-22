@@ -151,7 +151,7 @@ fn encryption_xml(data: &[&str]) -> String {
     )
 }
 
-fn rights() -> String {
+pub fn rights() -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use leafport_core::rsa::Pkcs1v15Encrypt;
     let wrapped = key()
@@ -177,6 +177,19 @@ pub fn protected_epub_with(chapter: &[u8], extra: &[(&str, &[u8])], data: &[&str
     ];
     entries.extend_from_slice(extra);
     epub(&entries)
+}
+
+/// `adept_epub` as an ADEPT server delivers it: without `META-INF/rights.xml`, whose
+/// licenseToken comes in the fulfillment response instead.
+pub fn adept_epub_without_rights(key: [u8; 16]) -> Vec<u8> {
+    let encryption = encryption_xml(&[ADEPT_DATA]);
+    let chapter = aes_encrypt(&key, &IV, CHAPTER, true);
+    epub(&[
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", CONTAINER),
+        ("META-INF/encryption.xml", encryption.as_bytes()),
+        ("OEBPS/ch1.xhtml", &chapter),
+    ])
 }
 
 pub fn protected_epub(key: [u8; 16], extra: &[(&str, &[u8])], data: &[&str]) -> Vec<u8> {

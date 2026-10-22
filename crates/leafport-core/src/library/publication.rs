@@ -76,7 +76,7 @@ pub fn decrypt_publication(
     license_key: &RsaPrivateKey,
 ) -> Result<Vec<u8>, LibraryError> {
     match format {
-        Format::Epub => decrypt_epub(body, license_key),
+        Format::Epub => decrypt_epub(body, license_token_xml, license_key),
         Format::Pdf => decrypt_pdf(body, license_token_xml, license_key),
         Format::Unknown => Err(LibraryError::UnsupportedFormat),
     }
@@ -103,7 +103,11 @@ fn decrypt_pdf(
     pdf_drm::decrypt_pdf(body, &content_key).map_err(drm_error)
 }
 
-fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, LibraryError> {
+fn decrypt_epub(
+    body: &[u8],
+    license_token_xml: Option<&str>,
+    license_key: &RsaPrivateKey,
+) -> Result<Vec<u8>, LibraryError> {
     let mut zip = ZipArchive::new(Cursor::new(body)).map_err(io::Error::from)?;
     let encryption = if zip.by_name(ENCRYPTION).is_ok() {
         read_text(&mut zip, ENCRYPTION).ok_or_else(|| invalid("unreadable encryption.xml"))?
@@ -116,8 +120,13 @@ fn decrypt_epub(body: &[u8], license_key: &RsaPrivateKey) -> Result<Vec<u8>, Lib
     if zip.len() > MAX_ENTRIES {
         return Err(invalid("EPUB has too many entries"));
     }
+    // ADEPT servers deliver the EPUB without rights.xml; its licenseToken comes in the
+    // fulfillment response, and is written into the book as rights.xml.
     let rights = read_text(&mut zip, RIGHTS)
-        .ok_or_else(|| LibraryError::Drm("protected EPUB has no readable rights.xml".into()))?;
+        .or_else(|| license_token_xml.map(str::to_owned))
+        .ok_or_else(|| {
+            LibraryError::Drm("protected EPUB has no rights.xml or licenseToken".into())
+        })?;
     let key = drm::content_key(&rights, license_key).map_err(drm_error)?;
     // Match CipherReference URIs to archive paths by percent-decoding them.
     let listed: Vec<(String, String, bool)> = drm::encrypted_resources(&encryption)
