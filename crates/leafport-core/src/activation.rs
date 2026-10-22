@@ -600,14 +600,18 @@ pub fn parse_activation_token(xml: &str) -> Result<ActivationToken, ActivationTo
     })
 }
 
-/// Read the activationURL from an ActivationServiceInfo response.
+/// Read the activationURL from an ActivationServiceInfo response. The live
+/// adeactivate.adobe.com response carries no activationURL, only authURL, which then
+/// serves as the activation base.
 pub fn parse_activation_url(xml: &str) -> Result<String, ActivationTokenError> {
     let document = parse_adept(xml)?;
     let root = document.root_element();
     if !root.has_tag_name((ADEPT_NS, "activationServiceInfo")) {
         return Err(ActivationTokenError::Missing("activationServiceInfo"));
     }
-    child_text(root, "activationURL").ok_or(ActivationTokenError::Missing("activationURL"))
+    child_text(root, "activationURL")
+        .or_else(|| child_text(root, "authURL"))
+        .ok_or(ActivationTokenError::Missing("activationURL"))
 }
 
 /// URL to post the activate request to.

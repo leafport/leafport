@@ -320,6 +320,26 @@ mod device_activation {
     }
 
     #[test]
+    fn service_info_without_activation_url_activates_at_auth_url() {
+        // Shape of the live adeactivate.adobe.com response: no activationURL element.
+        const LIVE_INFO: &str = r#"<activationServiceInfo xmlns="http://ns.adobe.com/adept"><authURL>http://a.example/adept</authURL><userInfoURL>http://a.example/adept</userInfoURL><certificate>AA==</certificate></activationServiceInfo>"#;
+        let mut state = unactivated();
+        let transport = FakeTransport::new()
+            .respond("/ActivationServiceInfo", 200, LIVE_INFO)
+            .respond(
+                "http://a.example/adept/Activate",
+                200,
+                token(&state.user, &state.fingerprint),
+            );
+        assert!(ensure_device_activation(&transport, &mut state).unwrap());
+        assert_eq!(state.device, "urn:uuid:server-device");
+        assert_eq!(
+            transport.requests.lock().unwrap()[1].0,
+            "http://a.example/adept/Activate"
+        );
+    }
+
+    #[test]
     fn stored_token_for_another_user_fails_without_network() {
         let mut state = unactivated();
         state.activation_token_xml = Some(token("urn:uuid:someone-else", &state.fingerprint));
