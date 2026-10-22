@@ -553,7 +553,7 @@ pub fn prepare_operator(
     {
         return Ok(false);
     }
-    let request = operator_auth_request(state)?;
+    let request = operator_auth_request(client, state)?;
     authorize_exchange(client, &format!("{operator}/Auth"), request, "Auth")?;
 
     // The activation service, rather than the operator, signs this account up for
@@ -602,7 +602,42 @@ fn authorize_exchange(
     Ok(())
 }
 
-fn operator_auth_request(state: &crate::store::ActivationState) -> Result<String, FulfillError> {
+/// SignInDirect credentials hold no authenticationCertificate; the operator's
+/// certificate is the one published by AuthenticationServiceInfo. Stored
+/// credentials that do carry one are used as they are.
+fn authentication_certificate(
+    client: &dyn crate::service::Transport,
+) -> Result<String, FulfillError> {
+    let failed = |reason: String| {
+        FulfillError::Authorization(format!("AuthenticationServiceInfo: {reason}"))
+    };
+    let response = client
+        .fetch(
+            crate::service::AUTHENTICATION_SERVICE_INFO,
+            crate::vendors::MAX_SERVICE_INFO_BYTES,
+        )
+        .map_err(|e| failed(e.to_string()))?;
+    if !response.status.is_success() {
+        return Err(failed(format!("HTTP {}", response.status)));
+    }
+    let xml =
+        std::str::from_utf8(&response.body).map_err(|_| failed("response is not UTF-8".into()))?;
+    let mut catalog = crate::vendors::VendorCatalog::new();
+    catalog
+        .apply_service_info(xml)
+        .map_err(|e| failed(e.to_string()))?;
+    catalog
+        .service_info()
+        .certificate
+        .clone()
+        .filter(|certificate| !certificate.is_empty())
+        .ok_or_else(|| failed("response has no certificate".into()))
+}
+
+fn operator_auth_request(
+    client: &dyn crate::service::Transport,
+    state: &crate::store::ActivationState,
+) -> Result<String, FulfillError> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use rsa::pkcs8::DecodePublicKey;
     use x509_cert::{
@@ -613,7 +648,7 @@ fn operator_auth_request(state: &crate::store::ActivationState) -> Result<String
 
     let missing = || {
         FulfillError::Authorization(
-            "stored credentials lack the authentication certificates; sign in again".into(),
+            "stored credentials lack the license certificate or signing key; sign in again".into(),
         )
     };
     let document = roxmltree::Document::parse_with_options(
@@ -639,7 +674,10 @@ fn operator_auth_request(state: &crate::store::ActivationState) -> Result<String
         (!text.is_empty()).then_some(text)
     };
     let license = text("licenseCertificate").ok_or_else(missing)?;
-    let authentication = text("authenticationCertificate").ok_or_else(missing)?;
+    let authentication = match text("authenticationCertificate") {
+        Some(certificate) => certificate,
+        None => authentication_certificate(client)?,
+    };
     let pfx = Zeroizing::new(
         STANDARD
             .decode(text("pkcs12").ok_or_else(missing)?)

@@ -111,6 +111,77 @@ fn operator_activation() -> leafport_core::store::ActivationState {
 }
 
 #[test]
+fn operator_auth_takes_the_authentication_certificate_from_service_info() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let mut state = operator_activation();
+    // SignInDirect credentials carry no authenticationCertificate.
+    let start = state
+        .credentials_xml
+        .find("<authenticationCertificate>")
+        .unwrap();
+    let end = state.credentials_xml.find("</credentials>").unwrap();
+    state.credentials_xml.replace_range(start..end, "");
+    let saved_credentials = state.credentials_xml.clone();
+    let acsm =
+        acsm_xml("urn:uuid:new-operator", "New operator").replace("op.example", "new.example");
+    let transport = FakeTransport::new()
+        .respond(
+            "/AuthenticationServiceInfo",
+            200,
+            format!(
+                r#"<authenticationServiceInfo xmlns="http://ns.adobe.com/adept"><authURL>http://a.example/adept</authURL><certificate>{}</certificate></authenticationServiceInfo>"#,
+                STANDARD.encode(b"AUTH_SERVICE_CERT")
+            ),
+        )
+        .respond(
+            "/fulfillment/Auth",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/InitLicenseService",
+            200,
+            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
+        )
+        .respond(
+            "/fulfillment/Fulfill",
+            200,
+            fulfillment_xml(
+                "urn:uuid:new-operator",
+                "New operator",
+                "https://dl.example/book.epub",
+                None,
+            ),
+        )
+        .respond(
+            "/book.epub",
+            200,
+            common::epub(&[("mimetype", b"application/epub+zip")]),
+        );
+
+    lib.sync_item(acsm.as_bytes(), &mut state, &transport)
+        .unwrap();
+
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(
+        requests[0].0,
+        leafport_core::service::AUTHENTICATION_SERVICE_INFO
+    );
+    let auth = roxmltree::Document::parse(&requests[1].1).unwrap();
+    let cert = auth
+        .descendants()
+        .find(|n| n.has_tag_name(("http://ns.adobe.com/adept", "authenticationCertificate")))
+        .unwrap();
+    assert_eq!(
+        STANDARD.decode(cert.text().unwrap()).unwrap(),
+        b"AUTH_SERVICE_CERT"
+    );
+    // The stored sign-in is left as the service returned it.
+    assert_eq!(state.credentials_xml, saved_credentials);
+}
+
+#[test]
 fn sync_authorizes_a_new_operator_before_requesting_the_book() {
     let root = tempdir();
     let lib = Library::open(root.path()).unwrap();
