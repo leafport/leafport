@@ -87,7 +87,17 @@ impl App {
     fn apply(&mut self, event: Event) {
         match event {
             Event::Rows { rows } => {
-                self.covers.clear();
+                // Read a cover again only for rows whose cover may have changed or that left.
+                for old in &self.rows {
+                    match rows.iter().find(|row| row.key == old.key) {
+                        Some(new) if !cover_changed(old, new) => {}
+                        Some(new) => {
+                            forget_cover(&mut self.covers, old);
+                            forget_cover(&mut self.covers, new);
+                        }
+                        None => forget_cover(&mut self.covers, old),
+                    }
+                }
                 self.rows = rows;
                 let rows = &self.rows;
                 self.progress
@@ -97,9 +107,10 @@ impl App {
                 let Some(slot) = self.rows.iter_mut().find(|old| old.key == row.key) else {
                     return;
                 };
-                // A changed row may have a new cover file; read it again.
-                for folder in [&slot.folder, &row.folder].into_iter().flatten() {
-                    self.covers.forget(Path::new(folder));
+                // A row with a new cover file or folder has its cover read again.
+                if cover_changed(slot, &row) {
+                    forget_cover(&mut self.covers, slot);
+                    forget_cover(&mut self.covers, &row);
                 }
                 if !is_syncing(&row) {
                     self.progress.remove(&row.key);
@@ -109,9 +120,7 @@ impl App {
             Event::RowRemoved { key } => {
                 if let Some(index) = self.rows.iter().position(|row| row.key == key) {
                     let row = self.rows.remove(index);
-                    if let Some(folder) = &row.folder {
-                        self.covers.forget(Path::new(folder));
-                    }
+                    forget_cover(&mut self.covers, &row);
                 }
                 self.progress.remove(&key);
             }
@@ -189,7 +198,7 @@ impl App {
             }
             Err(AppError::Busy) => {
                 self.core.add_message(
-                    "The books folder can change once the running sync finishes.".into(),
+                    "The books folder can change once the running job finishes.".into(),
                 );
                 // Nothing was saved; show the settings in effect again.
                 self.settings_view.open(&self.settings);
@@ -351,6 +360,18 @@ impl eframe::App for App {
                 self.apply_settings(new, &ctx);
             }
         }
+    }
+}
+
+/// Whether `new` may show a different cover than `old`.
+fn cover_changed(old: &Row, new: &Row) -> bool {
+    old.cover_path != new.cover_path || old.folder != new.folder
+}
+
+/// Drop the cached cover textures of `row`, so they are read again.
+fn forget_cover(covers: &mut list::Covers, row: &Row) {
+    for path in [&row.folder, &row.cover_path].into_iter().flatten() {
+        covers.forget(Path::new(path));
     }
 }
 

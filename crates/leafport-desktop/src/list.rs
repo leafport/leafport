@@ -54,11 +54,6 @@ impl Covers {
         self.textures.retain(|path, _| !path.starts_with(folder));
     }
 
-    /// Drop every texture, so each cover is read again.
-    pub fn clear(&mut self) {
-        self.textures.clear();
-    }
-
     fn get(&mut self, path: &Path, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.textures.contains_key(path) {
             self.textures.insert(path.to_path_buf(), None);
