@@ -210,6 +210,22 @@ pub fn decrypt_resource(
     inflate(plain)
 }
 
+/// Raw-inflate `plain` only if it is exactly one complete deflate stream: it inflates
+/// without error and the stream ends at the last byte. Plain text, markup or image
+/// data practically never passes, so this tells a deflated resource apart when
+/// encryption.xml carries no hint. `None` otherwise, or above MAX_RESOURCE_BYTES.
+pub fn inflate_exact(plain: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut decoder = flate2::bufread::DeflateDecoder::new(plain);
+    let mut output = Vec::with_capacity(plain.len() * 3);
+    (&mut decoder)
+        .take(MAX_RESOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut output)
+        .ok()?;
+    let rest = decoder.into_inner();
+    (rest.is_empty() && output.len() <= MAX_RESOURCE_BYTES).then_some(output)
+}
+
 /// Raw-inflate a decrypted resource, capped at MAX_RESOURCE_BYTES. Trailing bytes after
 /// the self-terminating stream, such as padding, are ignored.
 pub fn inflate(plain: &[u8]) -> Result<Vec<u8>, DrmError> {

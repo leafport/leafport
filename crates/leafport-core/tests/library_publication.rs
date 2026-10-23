@@ -202,6 +202,19 @@ fn deflated_chapter_without_compression_element_is_inflated_to_its_resource_size
 }
 
 #[test]
+fn deflated_chapter_without_any_compression_hint_is_inflated() {
+    // Kobo's ADEPT EPUBs list neither adept:Compression nor ResourceSize.
+    use std::io::Write;
+    let mut deflate = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    deflate.write_all(CHAPTER).unwrap();
+    let chapter = common::aes_encrypt(&KEY, &common::IV, &deflate.finish().unwrap(), true);
+    let source = common::protected_epub_with(&chapter, &[], &[ADEPT_DATA]);
+    let out = decrypt_publication(&source, Format::Epub, None, common::key()).unwrap();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&out)).unwrap();
+    assert_eq!(read(&mut zip, "OEBPS/ch1.xhtml"), CHAPTER);
+}
+
+#[test]
 fn uncompressed_chapter_with_resource_size_is_kept_as_decrypted() {
     let chapter = common::aes_encrypt(&KEY, &common::IV, CHAPTER, true);
     let source = common::protected_epub_with(&chapter, &[], &[&sized_data(CHAPTER.len())]);

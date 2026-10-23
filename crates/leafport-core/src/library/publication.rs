@@ -194,13 +194,24 @@ fn decrypt_epub(
                         .map_err(|e| LibraryError::Drm(format!("{name}: {e}")))?;
                     // Without a Compression element, a resource whose decrypted length
                     // differs from its ResourceSize is deflated if it inflates to it.
-                    if !compressed
-                        && let Some(size) = size
-                        && plain.len() != size
-                        && let Ok(inflated) = drm::inflate(&plain)
-                        && inflated.len() == size
-                    {
-                        plain = inflated;
+                    // With no size either (Kobo), it is deflated if it is exactly one
+                    // complete deflate stream.
+                    if !compressed {
+                        match size {
+                            Some(size) if plain.len() != size => {
+                                if let Ok(inflated) = drm::inflate(&plain)
+                                    && inflated.len() == size
+                                {
+                                    plain = inflated;
+                                }
+                            }
+                            Some(_) => {}
+                            None => {
+                                if let Some(inflated) = drm::inflate_exact(&plain) {
+                                    plain = inflated;
+                                }
+                            }
+                        }
                     }
                     add(&mut total, plain.len())?;
                     out.start_file(name.as_str(), deflated)
