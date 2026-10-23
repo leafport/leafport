@@ -27,12 +27,20 @@ pub struct App {
     pub failures: HashMap<String, String>,
     /// The sync or import whose worker runs (at most one).
     pub running: Option<Job>,
+    /// Download progress of the running sync, once its book download reports one.
+    pub progress: Option<f32>,
+    /// Cancel flag of the running sync.
+    pub cancel: Option<leafport_core::service::CancelToken>,
     /// Syncs and imports waiting to run, in the order requested.
     pub queue: VecDeque<Job>,
     /// Rows whose loan return runs.
     pub returning: HashSet<String>,
     /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
     pub row_errors: HashMap<String, String>,
+    /// Row whose removal awaits confirmation.
+    confirm_remove: Option<String>,
+    /// Rows whose folder is removed once their loan return succeeds.
+    remove_after_return: HashSet<String>,
     /// Recent unique messages, oldest first.
     pub banner: Vec<String>,
     pub settings: Settings,
@@ -112,9 +120,13 @@ impl App {
             rows: vec![],
             failures: HashMap::new(),
             running: None,
+            progress: None,
+            cancel: None,
             queue: VecDeque::new(),
             returning: HashSet::new(),
             row_errors: HashMap::new(),
+            confirm_remove: None,
+            remove_after_return: HashSet::new(),
             banner,
             settings,
             settings_view: settings_view::SettingsView::default(),
@@ -195,6 +207,95 @@ impl App {
         jobs::return_loan(&self.tx, ctx, item);
     }
 
+    /// Delete the title folder of the row with `key` and rescan. The book stays in the
+    /// cloud list.
+    fn remove_folder(&mut self, key: &str) {
+        let Some(folder) = self
+            .rows
+            .iter()
+            .find(|row| row.key == key)
+            .and_then(|row| row.folder.clone())
+        else {
+            return;
+        };
+        // Only a title folder directly inside the books folder is ever deleted.
+        if folder.parent() != Some(self.library.root.as_path()) {
+            add_banner(
+                &mut self.banner,
+                format!(
+                    "Not removing {}: outside the books folder",
+                    folder.display()
+                ),
+            );
+            return;
+        }
+        match std::fs::remove_dir_all(&folder) {
+            Ok(()) => {
+                self.covers.forget(&folder);
+                self.failures.remove(key);
+                self.row_errors.remove(key);
+            }
+            Err(e) => add_banner(
+                &mut self.banner,
+                format!("Could not remove {}: {e}", folder.display()),
+            ),
+        }
+        self.rescan();
+    }
+
+    /// The confirmation dialog for `confirm_remove`. An active loan is returned first;
+    /// its folder is deleted once the return succeeds.
+    fn remove_dialog(&mut self, ctx: &egui::Context) {
+        let Some(key) = self.confirm_remove.clone() else {
+            return;
+        };
+        let Some(item) = self.rows.iter().find(|row| row.key == key) else {
+            self.confirm_remove = None;
+            return;
+        };
+        let Some(folder) = item.folder.clone() else {
+            self.confirm_remove = None;
+            return;
+        };
+        let title = item.title.clone();
+        let on_loan = matches!(item.state, ItemState::OnLoan { .. })
+            || item.metadata.as_ref().is_some_and(|m| m.loan.is_some());
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let modal = egui::Modal::new(egui::Id::unique("remove")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading(format!("Remove \"{title}\" from disk?"));
+            ui.label(format!("This deletes {}.", folder.display()));
+            ui.label("The book stays in your cloud library.");
+            if on_loan {
+                ui.label(
+                    "The loan is returned first. The folder is deleted once the return succeeds.",
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let confirm = if on_loan {
+                    "Return and remove"
+                } else {
+                    "Remove"
+                };
+                confirmed = ui.button(confirm).clicked();
+                cancelled = ui.button("Cancel").clicked();
+            });
+        });
+        if confirmed {
+            self.confirm_remove = None;
+            if on_loan {
+                self.remove_after_return.insert(key.clone());
+                self.start_return(key, ctx);
+            } else {
+                self.remove_folder(&key);
+            }
+        } else if cancelled || modal.should_close() {
+            self.confirm_remove = None;
+        }
+    }
+
     fn sign_out(&mut self) {
         if self.account.sign_out().is_err() {
             return;
@@ -244,8 +345,29 @@ impl App {
         }
     }
 
+    /// Keys of the rows Sync all queues: Available or Failed, with an ACSM and no book
+    /// file on disk yet.
+    fn unsynced(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|row| matches!(row.state, ItemState::Available | ItemState::Failed(_)))
+            .filter(|row| row.publication.is_none() && row.acsm.is_some())
+            .map(|row| row.key.clone())
+            .collect()
+    }
+
+    /// Queue every book that is not on disk yet, in list order.
+    fn sync_all(&mut self, ctx: &egui::Context) {
+        for key in self.unsynced() {
+            self.enqueue(key, ctx);
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let can_sync_all = self.account.signed_in.is_some() && !self.unsynced().is_empty();
+        let syncing =
+            self.running_cancellable() || self.queue.iter().any(|job| matches!(job, Job::Sync(_)));
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Import ACSM…").clicked()
@@ -262,6 +384,17 @@ impl App {
                     ui.spinner();
                     ui.weak("Importing…");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(can_sync_all, egui::Button::new("Sync all"))
+                        .clicked()
+                    {
+                        self.sync_all(&ctx);
+                    }
+                    if syncing && ui.button("Cancel all").clicked() {
+                        self.cancel_all_syncs();
+                    }
+                });
             });
         });
     }
@@ -272,7 +405,10 @@ impl App {
         }
         egui::Panel::top("banner").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button("✕").clicked() {
+                if ui
+                    .add(egui::Button::new(list::close_icon(ui)).small())
+                    .clicked()
+                {
                     self.banner.clear();
                 }
                 ui.vertical(|ui| {
@@ -309,8 +445,15 @@ impl App {
                     Err(e) => add_banner(&mut self.banner, format!("Refresh failed: {e}")),
                 }
             }
+            Event::Progress { key, fraction } => {
+                if matches!(&self.running, Some(Job::Sync(running)) if *running == key) {
+                    self.progress = Some(fraction);
+                }
+            }
             Event::Synced { key, result } => {
                 self.running = None;
+                self.progress = None;
+                let cancelled = self.cancel.take().is_some_and(|token| token.is_cancelled());
                 match result {
                     Ok(outcome) => {
                         self.failures.remove(&key);
@@ -319,6 +462,8 @@ impl App {
                             add_banner(&mut self.banner, warning);
                         }
                     }
+                    // A cancelled sync leaves the row as it was, not Failed.
+                    Err(_) if cancelled => {}
                     Err(e) => {
                         self.failures.insert(key, e);
                     }
@@ -343,7 +488,9 @@ impl App {
             }
             Event::Returned { key, result } => {
                 self.returning.remove(&key);
+                let remove = self.remove_after_return.remove(&key);
                 match result {
+                    Ok(_) if remove => self.remove_folder(&key),
                     Ok(_) => {
                         self.row_errors.remove(&key);
                         let folder = self.rows.iter().find(|row| row.key == key);
@@ -428,6 +575,8 @@ impl eframe::App for App {
             }
             let busy = list::Busy {
                 running: self.running.as_ref(),
+                progress: self.progress,
+                cancellable: self.running_cancellable(),
                 queue: &self.queue,
                 returning: &self.returning,
                 row_errors: &self.row_errors,
@@ -437,16 +586,19 @@ impl eframe::App for App {
         match clicked {
             Some(list::Action::Sync(key)) => self.enqueue(key, &ctx),
             Some(list::Action::Return(key)) => self.start_return(key, &ctx),
-            Some(list::Action::ShowInFolder(folder)) => {
-                if let Err(e) = list::show_in_folder(&folder) {
+            Some(list::Action::Open(path) | list::Action::ShowInFolder(path)) => {
+                if let Err(e) = list::open_path(&path) {
                     add_banner(
                         &mut self.banner,
-                        format!("Could not open {}: {e}", folder.display()),
+                        format!("Could not open {}: {e}", path.display()),
                     );
                 }
             }
+            Some(list::Action::Remove(key)) => self.confirm_remove = Some(key),
+            Some(list::Action::Cancel(key)) => self.cancel_sync(&key),
             None => {}
         }
+        self.remove_dialog(&ctx);
         if self.account.open {
             self.account.window(&self.tx, &ctx);
         }

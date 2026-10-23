@@ -4,7 +4,7 @@ use eframe::egui;
 use leafport_core::{
     cloud::DownloadRecord,
     library::{self, Item, Metadata, SyncOutcome},
-    service::ServiceClient,
+    service::{AdeptResponse, CancelToken, ServiceClient, ServiceError, Transport},
     store::{ActivationState, DEFAULT_ACCOUNT, KeyringStore},
     vendors::VendorCatalog,
 };
@@ -32,6 +32,11 @@ pub enum Event {
     Refreshed {
         generation: u64,
         result: Result<Vec<DownloadRecord>, String>,
+    },
+    /// Download progress of the running sync of the row with `key`, as a fraction.
+    Progress {
+        key: String,
+        fraction: f32,
     },
     /// A completed sync of the row with `key`.
     Synced {
@@ -85,9 +90,39 @@ fn load_activation() -> Result<ActivationState, String> {
         .ok_or_else(|| "not signed in".to_string())
 }
 
+/// A transport whose book downloads report their progress; everything else is the
+/// plain client.
+struct ProgressTransport<'a> {
+    client: &'a ServiceClient,
+    report: &'a (dyn Fn(u64, Option<u64>) + Sync),
+    on_fulfill: &'a (dyn Fn() + Sync),
+}
+
+impl Transport for ProgressTransport<'_> {
+    fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+        self.client.post_adept(url, xml)
+    }
+
+    fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        self.client.fetch(url, max_bytes)
+    }
+
+    fn download(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        self.client
+            .download_with_progress(url, max_bytes, self.report)
+    }
+
+    fn before_fulfill(&self) -> Result<(), ServiceError> {
+        self.client.before_fulfill()?;
+        (self.on_fulfill)();
+        Ok(())
+    }
+}
+
 /// Require the device activation made at sign-in, and keep successful operator setup
 /// even if the subsequent book download fails, so the next sync reuses it.
 fn with_fulfillment_activation<T>(
+    cancel: Option<CancelToken>,
     work: impl FnOnce(&mut ActivationState, &ServiceClient) -> Result<T, String>,
 ) -> Result<T, String> {
     let registration = crate::account::ACTIVATION_LOCK
@@ -97,7 +132,10 @@ fn with_fulfillment_activation<T>(
     let user = state.user.clone();
     let device_key = state.device_key;
     let credentials = state.credentials_xml.clone();
-    let client = ServiceClient::new().map_err(|e| e.to_string())?;
+    let mut client = ServiceClient::new().map_err(|e| e.to_string())?;
+    if let Some(token) = cancel {
+        client = client.with_cancel(token);
+    }
     let store = KeyringStore::new();
     let account_is_current = || {
         load_activation().is_ok_and(|current| {
@@ -213,6 +251,41 @@ impl App {
         self.start_next_sync(ctx);
     }
 
+    /// Stop the sync of the row with `key`: drop it from the queue, or ask its running
+    /// worker to stop at the next safe point.
+    pub fn cancel_sync(&mut self, key: &str) {
+        self.queue
+            .retain(|job| !matches!(job, Job::Sync(k) if k == key));
+        if matches!(&self.running, Some(Job::Sync(k)) if k == key) {
+            self.request_cancel();
+        }
+    }
+
+    /// Stop every queued sync, and the running one unless its Fulfill was sent. Imports
+    /// are left alone.
+    pub fn cancel_all_syncs(&mut self) {
+        self.queue.retain(|job| !matches!(job, Job::Sync(_)));
+        if matches!(self.running, Some(Job::Sync(_))) {
+            self.request_cancel();
+        }
+    }
+
+    /// Ask the running sync to stop; no effect once its Fulfill was sent.
+    fn request_cancel(&self) {
+        if let Some(token) = &self.cancel {
+            token.cancel();
+        }
+    }
+
+    /// Whether the running sync can still be cancelled: its Fulfill was not sent.
+    pub fn running_cancellable(&self) -> bool {
+        matches!(self.running, Some(Job::Sync(_)))
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|token| !token.is_committed())
+    }
+
     /// Start the front queued job when no sync or import worker runs.
     pub fn start_next_sync(&mut self, ctx: &egui::Context) {
         if self.running.is_some() {
@@ -223,6 +296,8 @@ impl App {
         };
         let library = self.library.clone();
         self.running = Some(job.clone());
+        self.progress = None;
+        self.cancel = None;
         match job {
             Job::Sync(key) => {
                 let acsm = self
@@ -230,6 +305,12 @@ impl App {
                     .iter()
                     .find(|row| row.key == key)
                     .and_then(|row| row.acsm.clone());
+                let progress_tx = self.tx.clone();
+                let progress_ctx = ctx.clone();
+                let progress_key = key.clone();
+                let cancel = CancelToken::new();
+                self.cancel = Some(cancel.clone());
+                let fulfill_ctx = ctx.clone();
                 spawn(
                     &self.tx,
                     ctx,
@@ -242,9 +323,33 @@ impl App {
                             String::from_utf8_lossy(&acsm).into_owned(),
                         )
                         .map_err(|e| e.to_string())?;
-                        with_fulfillment_activation(|activation, client| {
+                        // Report whole percents only, so a large book sends at most 100 events.
+                        // 255 means nothing was reported yet.
+                        let percent = std::sync::atomic::AtomicU8::new(u8::MAX);
+                        let report = |received: u64, total: Option<u64>| {
+                            let Some(total) = total.filter(|&total| total > 0) else {
+                                return;
+                            };
+                            let now = (received.min(total) * 100 / total) as u8;
+                            if percent.swap(now, std::sync::atomic::Ordering::Relaxed) == now {
+                                return;
+                            }
+                            let _ = progress_tx.send(Event::Progress {
+                                key: progress_key.clone(),
+                                fraction: f32::from(now) / 100.0,
+                            });
+                            progress_ctx.request_repaint();
+                        };
+                        with_fulfillment_activation(Some(cancel), |activation, client| {
+                            // Cancel turns off once Fulfill is committed; redraw to show it.
+                            let on_fulfill = || fulfill_ctx.request_repaint();
+                            let transport = ProgressTransport {
+                                client,
+                                report: &report,
+                                on_fulfill: &on_fulfill,
+                            };
                             library
-                                .sync_item(&acsm, activation, client)
+                                .sync_item(&acsm, activation, &transport)
                                 .map_err(|e| e.to_string())
                         })
                     },
@@ -267,7 +372,7 @@ impl App {
                         .read_to_string(&mut acsm)
                         .map_err(|e| e.to_string())?;
                     leafport_core::fulfillment::Acsm::parse(acsm).map_err(|e| e.to_string())?;
-                    with_fulfillment_activation(|activation, client| {
+                    with_fulfillment_activation(None, |activation, client| {
                         library
                             .import_acsm(&path, activation, client)
                             .map_err(|e| e.to_string())
