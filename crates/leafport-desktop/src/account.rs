@@ -8,7 +8,7 @@ pub struct Account {
     /// The sign-in providers: the built-in ones until a load succeeds.
     providers: Vec<Provider>,
     provider: usize,
-    /// Whether a provider load succeeded, so discovery has supplied its certificate.
+    /// Whether a provider load succeeded; until then opening the window loads them.
     loaded: bool,
     provider_status: String,
     username: String,
@@ -92,8 +92,12 @@ impl Account {
     }
 
     /// Submit the form. Credentials are moved out of the UI so they are not retained
-    /// after submission; an incomplete form keeps them so the user can finish it.
-    fn sign_in(&mut self, core: &leafport_app::App) {
+    /// after submission; an incomplete form, or one sent before discovery is ready,
+    /// keeps them so the user can finish it.
+    fn sign_in(&mut self, core: &leafport_app::App, status: &Status) {
+        if !status.sign_in_ready {
+            return;
+        }
         let Some(provider) = self.providers.get(self.provider) else {
             return;
         };
@@ -146,9 +150,7 @@ impl Account {
                 ));
             }
             ui.separator();
-            // A successful load stands in for "discovery returned its certificate"; the
-            // app still checks the certificate and reports it when missing.
-            let has_certificate = self.loaded;
+            let has_certificate = status.sign_in_ready;
             egui::Grid::new("sign-in").num_columns(2).show(ui, |ui| {
                 ui.label("Username");
                 ui.add_enabled(!signing, egui::TextEdit::singleline(&mut self.username));
@@ -164,7 +166,7 @@ impl Account {
                 .add_enabled(!signing && has_certificate, egui::Button::new("Sign in"))
                 .clicked()
             {
-                self.sign_in(core);
+                self.sign_in(core, status);
             }
             if signing {
                 ui.spinner();

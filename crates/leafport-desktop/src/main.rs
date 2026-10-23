@@ -187,8 +187,10 @@ impl App {
                 ctx.set_theme(settings_view::theme_preference(&new.theme));
                 self.settings = new;
             }
-            Err(e @ AppError::Busy) => {
-                self.core.add_message(e.to_string());
+            Err(AppError::Busy) => {
+                self.core.add_message(
+                    "The books folder can change once the running sync finishes.".into(),
+                );
                 // Nothing was saved; show the settings in effect again.
                 self.settings_view.open(&self.settings);
             }

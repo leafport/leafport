@@ -50,6 +50,7 @@ mod tests {
             folder: None,
             publication: None,
             error: None,
+            warning: None,
             on_loan: false,
             activity: Activity::Idle,
             primary: None,

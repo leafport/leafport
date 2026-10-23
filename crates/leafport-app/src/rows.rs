@@ -118,6 +118,7 @@ pub(crate) fn row(item: &Item, busy: &Busy) -> Row {
         folder: item.folder.as_deref().map(path_string),
         publication: item.publication.as_deref().map(path_string),
         error: failure.or_else(|| busy.row_errors.get(key).cloned()),
+        warning: item.warning.clone(),
         on_loan,
         activity,
         primary,
@@ -147,6 +148,7 @@ pub(crate) fn status(inputs: &StatusInputs) -> Status {
         can_sync_all: false,
         can_cancel_all: false,
         sign_in_error: None,
+        sign_in_ready: false,
         banner: inputs.banner.to_vec(),
         books_dir: inputs.books_dir.map(path_string),
     }
@@ -235,6 +237,21 @@ mod tests {
         assert!(r.menu.is_empty());
         assert_eq!(r.activity, Activity::Idle);
         assert_eq!(r.format, "EPUB");
+    }
+
+    #[test]
+    fn warning_is_carried() {
+        let mut i = item(ItemState::Local);
+        i.warning = Some("metadata.yaml is malformed: bad".into());
+        let r = Env::new().row(&i, None, false);
+        assert_eq!(
+            r.warning.as_deref(),
+            Some("metadata.yaml is malformed: bad")
+        );
+        assert_eq!(
+            Env::new().row(&item(ItemState::Local), None, false).warning,
+            None
+        );
     }
 
     #[test]

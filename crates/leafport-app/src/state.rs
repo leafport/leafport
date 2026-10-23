@@ -399,6 +399,9 @@ impl State {
         status.loading_providers = self.loading_providers;
         status.signing_in = self.signing_in;
         status.sign_in_error = self.sign_in_error.clone();
+        let info = self.catalog.service_info();
+        status.sign_in_ready =
+            info.auth_url.is_some() && info.certificate.as_deref().is_some_and(|c| !c.is_empty());
         status.importing = matches!(self.running, Some(Job::Import(_)));
         status.job_running = self.running.is_some();
         status.can_sync_all = self.user.is_some() && !self.unsynced().is_empty();

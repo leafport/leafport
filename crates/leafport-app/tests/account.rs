@@ -149,6 +149,24 @@ fn providers_error_keeps_catalog() {
 }
 
 #[test]
+fn sign_in_ready_follows_catalog() {
+    let s = signed_out();
+    assert!(!s.status().sign_in_ready);
+    s.load();
+    s.wait_status(|st| st.sign_in_ready);
+    s.app.load_providers();
+    assert_eq!(s.script.next_call(), Call::LoadProviders);
+    s.script.providers.send(Err("dns".into())).unwrap();
+    s.recorder.wait_for(|e| {
+        e.contains(&Event::Providers {
+            result: Err("dns".into()),
+        })
+    });
+    s.wait_status(|st| !st.loading_providers);
+    assert!(s.status().sign_in_ready);
+}
+
+#[test]
 fn sign_in_needs_certificate() {
     let s = signed_out();
     s.app

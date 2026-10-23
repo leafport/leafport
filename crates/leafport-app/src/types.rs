@@ -22,7 +22,8 @@ pub enum Activity {
     Returning,
 }
 
-/// The row's main button. `None` in `Row::primary` means no button.
+/// The row's main button. `None` in `Row::primary` means there is no enabled primary
+/// action; a UI may draw the button disabled.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Primary {
     Open,
@@ -63,6 +64,8 @@ pub struct Row {
     pub folder: Option<String>,
     pub publication: Option<String>,
     pub error: Option<String>,
+    /// A problem with the title folder, such as malformed metadata; shown below the row.
+    pub warning: Option<String>,
     pub on_loan: bool,
     pub activity: Activity,
     pub primary: Option<Primary>,
@@ -81,6 +84,9 @@ pub struct Status {
     pub can_sync_all: bool,
     pub can_cancel_all: bool,
     pub sign_in_error: Option<String>,
+    /// Whether discovery supplied an authentication URL and a certificate, so a sign-in
+    /// can be sent.
+    pub sign_in_ready: bool,
     pub banner: Vec<String>,
     /// The effective books folder.
     pub books_dir: Option<String>,

@@ -216,6 +216,8 @@ fn text(ui: &mut egui::Ui, row: &Row) {
             egui::Label::new(egui::RichText::new(message).color(ui.visuals().error_fg_color))
                 .truncate(),
         );
+    } else if let Some(warning) = &row.warning {
+        ui.add(egui::Label::new(egui::RichText::new(warning).weak()).truncate());
     }
 }
 
