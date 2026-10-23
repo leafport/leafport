@@ -1,36 +1,52 @@
 //! The title list: one fixed-height row per item, with cover thumbnails.
 
 use eframe::egui;
-use leafport_core::library::{Item, ItemState};
+use leafport_app::{Activity, MenuAction, Primary, Row, RowState};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::mpsc::Sender,
+    sync::mpsc::{self, Receiver, Sender},
 };
-
-use crate::jobs::{self, Event, Job};
 
 pub const ROW_HEIGHT: f32 = 72.0;
 const COVER: egui::Vec2 = egui::vec2(48.0, 64.0);
 /// Wide enough for every main button label, so a spinner does not resize the button.
 const MAIN_BUTTON_WIDTH: f32 = 64.0;
 
+/// A decoded cover thumbnail, or None when it could not be read.
+type Decoded = (PathBuf, Option<egui::ColorImage>);
+
 /// Cover textures by file path. A path is requested once; None means pending or unreadable.
-#[derive(Default)]
 pub struct Covers {
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    tx: Sender<Decoded>,
+    rx: Receiver<Decoded>,
+}
+
+impl Default for Covers {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            textures: HashMap::new(),
+            tx,
+            rx,
+        }
+    }
 }
 
 impl Covers {
-    pub fn insert(&mut self, ctx: &egui::Context, path: PathBuf, image: Option<egui::ColorImage>) {
-        let texture = image.map(|image| {
-            ctx.load_texture(
-                path.display().to_string(),
-                image,
-                egui::TextureOptions::LINEAR,
-            )
-        });
-        self.textures.insert(path, texture);
+    /// Turn the decoded covers that arrived into textures.
+    pub fn receive(&mut self, ctx: &egui::Context) {
+        while let Ok((path, image)) = self.rx.try_recv() {
+            let texture = image.map(|image| {
+                ctx.load_texture(
+                    path.display().to_string(),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
+            self.textures.insert(path, texture);
+        }
     }
 
     /// Drop the textures of covers inside `folder`, so a replaced cover is read again.
@@ -38,52 +54,40 @@ impl Covers {
         self.textures.retain(|path, _| !path.starts_with(folder));
     }
 
-    fn get(
-        &mut self,
-        path: &Path,
-        tx: &Sender<Event>,
-        ctx: &egui::Context,
-    ) -> Option<&egui::TextureHandle> {
+    /// Drop every texture, so each cover is read again.
+    pub fn clear(&mut self) {
+        self.textures.clear();
+    }
+
+    fn get(&mut self, path: &Path, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.textures.contains_key(path) {
             self.textures.insert(path.to_path_buf(), None);
-            jobs::cover(tx, ctx, path.to_path_buf());
+            self.load(path.to_path_buf(), ctx);
         }
         self.textures.get(path).and_then(Option::as_ref)
     }
-}
 
-/// Which rows are queued, syncing or returning, and the last return error per row.
-pub struct Busy<'a> {
-    pub running: Option<&'a Job>,
-    /// Download progress of the running sync; None until its download reports one.
-    pub progress: Option<f32>,
-    /// Whether the running sync can still be cancelled, i.e. its Fulfill was not sent.
-    pub cancellable: bool,
-    pub queue: &'a VecDeque<Job>,
-    pub returning: &'a HashSet<String>,
-    pub row_errors: &'a HashMap<String, String>,
-}
-
-impl Busy<'_> {
-    /// True while the row's own sync runs.
-    fn syncing(&self, key: &str) -> bool {
-        matches!(self.running, Some(Job::Sync(k)) if k == key)
-    }
-
-    /// True while the row's sync or loan return runs.
-    fn working(&self, key: &str) -> bool {
-        matches!(self.running, Some(Job::Sync(k)) if k == key) || self.returning.contains(key)
-    }
-
-    fn queued(&self, key: &str) -> bool {
-        self.queue
-            .iter()
-            .any(|job| matches!(job, Job::Sync(k) if k == key))
-    }
-
-    /// True while the row's sync or loan return runs or waits.
-    fn busy(&self, key: &str) -> bool {
-        self.working(key) || self.queued(key)
+    /// Decode a cover file on a worker thread and scale it to fit 96×128.
+    fn load(&self, path: PathBuf, ctx: &egui::Context) {
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let decode = || -> Result<egui::ColorImage, String> {
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                let rgba = image::load_from_memory(&bytes)
+                    .map_err(|e| e.to_string())?
+                    .thumbnail(96, 128)
+                    .to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                Ok(egui::ColorImage::from_rgba_unmultiplied(size, &rgba))
+            };
+            // A panicking decoder counts as unreadable, like a failed decode.
+            let image = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
+                .ok()
+                .and_then(Result::ok);
+            let _ = tx.send((path, image));
+            ctx.request_repaint();
+        });
     }
 }
 
@@ -118,48 +122,48 @@ pub fn open_path(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn state_label(state: &ItemState) -> &'static str {
+fn state_label(state: &RowState) -> &'static str {
     match state {
-        ItemState::Available => "Available",
-        ItemState::Synced => "Synced",
-        ItemState::OnLoan { .. } => "On loan",
-        ItemState::Returned => "Returned",
-        ItemState::Local => "Local",
-        ItemState::Failed(_) => "Failed",
+        RowState::Available => "Available",
+        RowState::Synced => "Synced",
+        RowState::OnLoan => "On loan",
+        RowState::Returned => "Returned",
+        RowState::Local => "Local",
+        RowState::Failed => "Failed",
     }
 }
 
-/// Draw the visible rows. Returns the row button that was clicked, if any.
+/// Draw the visible rows. `progress` holds the download fraction of syncing rows.
+/// Returns the row button that was clicked, if any.
 pub fn show(
     ui: &mut egui::Ui,
-    rows: &[Item],
-    busy: Busy<'_>,
+    rows: &[Row],
+    progress: &HashMap<String, f32>,
     covers: &mut Covers,
-    tx: &Sender<Event>,
 ) -> Option<Action> {
     let mut clicked = None;
     let ctx = ui.ctx().clone();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
-            for item in &rows[range] {
+            for row in &rows[range] {
                 let size = egui::vec2(ui.available_width(), ROW_HEIGHT);
                 ui.allocate_ui_with_layout(
                     size,
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.set_height(ROW_HEIGHT);
-                        let texture = item
-                            .cover
+                        let texture = row
+                            .cover_path
                             .as_deref()
-                            .and_then(|path| covers.get(path, tx, &ctx));
-                        cover(ui, texture, item.format.label());
+                            .and_then(|path| covers.get(Path::new(path), &ctx));
+                        cover(ui, texture, &row.format);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(action) = action(ui, item, &busy) {
+                            if let Some(action) = action(ui, row, progress.get(&row.key).copied()) {
                                 clicked = Some(action);
                             }
                             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                text(ui, item, busy.row_errors.get(&item.key));
+                                text(ui, row);
                             });
                         });
                     },
@@ -195,12 +199,11 @@ fn cover(ui: &mut egui::Ui, texture: Option<&egui::TextureHandle>, format: &str)
     }
 }
 
-fn text(ui: &mut egui::Ui, item: &Item, row_error: Option<&String>) {
-    ui.add(egui::Label::new(egui::RichText::new(&item.title).strong()).truncate());
-    let mut info = format!("{} · {}", item.format.label(), state_label(&item.state));
-    if let ItemState::OnLoan {
-        expires: Some(expires),
-    } = &item.state
+fn text(ui: &mut egui::Ui, row: &Row) {
+    ui.add(egui::Label::new(egui::RichText::new(&row.title).strong()).truncate());
+    let mut info = format!("{} · {}", row.format, state_label(&row.state));
+    if row.state == RowState::OnLoan
+        && let Some(expires) = &row.expires
     {
         info.push_str(&format!(
             " · until {}",
@@ -208,17 +211,11 @@ fn text(ui: &mut egui::Ui, item: &Item, row_error: Option<&String>) {
         ));
     }
     ui.add(egui::Label::new(info).truncate());
-    let error = match &item.state {
-        ItemState::Failed(message) => Some(message),
-        _ => row_error,
-    };
-    if let Some(message) = error {
+    if let Some(message) = &row.error {
         ui.add(
             egui::Label::new(egui::RichText::new(message).color(ui.visuals().error_fg_color))
                 .truncate(),
         );
-    } else if let Some(warning) = &item.warning {
-        ui.add(egui::Label::new(egui::RichText::new(warning).weak()).truncate());
     }
 }
 
@@ -283,59 +280,69 @@ fn more_icon<'a>(ui: &egui::Ui) -> egui::Atom<'a> {
 
 /// Draw the row's main button and its menu button, right to left. Returns the action
 /// that was clicked.
-fn action(ui: &mut egui::Ui, item: &Item, busy: &Busy<'_>) -> Option<Action> {
-    let working = busy.busy(&item.key);
-    let key = || item.key.clone();
-    // A loan can be returned without a cloud record, so local loan folders offer it too.
-    let on_loan = matches!(item.state, ItemState::OnLoan { .. })
-        || item.metadata.as_ref().is_some_and(|m| m.loan.is_some());
-    let resync = item.publication.is_some()
-        && item.acsm.is_some()
-        && !matches!(item.state, ItemState::Returned);
+fn action(ui: &mut egui::Ui, row: &Row, progress: Option<f32>) -> Option<Action> {
+    let key = || row.key.clone();
     let mut clicked = None;
 
     // A queued or running sync offers only Cancel, until the running sync's Fulfill is
-    // sent; a loan return cannot be cancelled.
-    let sync_pending = busy.syncing(&item.key) || busy.queued(&item.key);
-    let cancellable = busy.queued(&item.key) || busy.cancellable;
-    let has_entries = resync || on_loan || item.folder.is_some();
-    ui.add_enabled_ui(sync_pending || (!working && has_entries), |ui| {
+    // sent; a loan return offers nothing.
+    ui.add_enabled_ui(!row.menu.is_empty(), |ui| {
         let button = egui::Button::new(more_icon(ui)).frame_when_inactive(false);
         egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-            if sync_pending {
-                if ui
-                    .add_enabled(cancellable, egui::Button::new("Cancel sync"))
-                    .clicked()
-                {
-                    clicked = Some(Action::Cancel(key()));
-                }
-                return;
-            }
-            if resync && ui.button("Sync again").clicked() {
-                clicked = Some(Action::Sync(key()));
-            }
-            if on_loan && ui.button("Return loan").clicked() {
-                clicked = Some(Action::Return(key()));
-            }
-            if let Some(folder) = &item.folder {
-                if ui.button("Show in folder").clicked() {
-                    clicked = Some(Action::ShowInFolder(folder.clone()));
-                }
-                if ui.button("Remove from disk…").clicked() {
-                    clicked = Some(Action::Remove(key()));
+            for entry in &row.menu {
+                match entry {
+                    MenuAction::CancelSync { enabled } => {
+                        if ui
+                            .add_enabled(*enabled, egui::Button::new("Cancel sync"))
+                            .clicked()
+                        {
+                            clicked = Some(Action::Cancel(key()));
+                        }
+                    }
+                    MenuAction::SyncAgain => {
+                        if ui.button("Sync again").clicked() {
+                            clicked = Some(Action::Sync(key()));
+                        }
+                    }
+                    MenuAction::ReturnLoan => {
+                        if ui.button("Return loan").clicked() {
+                            clicked = Some(Action::Return(key()));
+                        }
+                    }
+                    MenuAction::ShowInFolder => {
+                        if let Some(folder) = &row.folder
+                            && ui.button("Show in folder").clicked()
+                        {
+                            clicked = Some(Action::ShowInFolder(PathBuf::from(folder)));
+                        }
+                    }
+                    MenuAction::RemoveFromDisk => {
+                        if ui.button("Remove from disk…").clicked() {
+                            clicked = Some(Action::Remove(key()));
+                        }
+                    }
                 }
             }
         });
     });
 
-    let (label, main) = match (&item.publication, &item.state) {
-        (Some(path), _) => ("Open", Some(Action::Open(path.clone()))),
-        (None, ItemState::Failed(_)) => ("Retry", item.acsm.as_ref().map(|_| Action::Sync(key()))),
-        (None, _) => ("Sync", item.acsm.as_ref().map(|_| Action::Sync(key()))),
+    let (label, main) = match &row.primary {
+        Some(Primary::Open) => (
+            "Open",
+            row.publication
+                .as_ref()
+                .map(|path| Action::Open(PathBuf::from(path))),
+        ),
+        Some(Primary::Retry) => ("Retry", Some(Action::Sync(key()))),
+        Some(Primary::Sync) => ("Sync", Some(Action::Sync(key()))),
+        // A row without an ACSM keeps a disabled button, labelled as it would be.
+        None if row.state == RowState::Failed => ("Retry", None),
+        None => ("Sync", None),
     };
-    let button = if busy.syncing(&item.key) {
+    let working = row.activity != Activity::Idle;
+    let button = if matches!(row.activity, Activity::Syncing { .. }) {
         // The active sync shows a progress bar in the button's place and size.
-        progress_button(ui, busy.progress);
+        progress_button(ui, progress);
         return clicked;
     } else if working {
         // A waiting sync or a loan return shows a spinner in place of the label, so the

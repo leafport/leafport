@@ -2221,13 +2221,11 @@ dependencies = [
 name = "leafport-desktop"
 version = "0.1.0-dev"
 dependencies = [
- "base64",
  "eframe",
  "image",
+ "leafport-app",
  "leafport-core",
- "machine-uid",
  "rfd",
- "sha1 0.11.0",
  "winit",
 ]
 

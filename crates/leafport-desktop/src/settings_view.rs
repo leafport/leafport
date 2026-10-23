@@ -1,10 +1,10 @@
 //! The Settings window: books folder and theme.
 
 use eframe::egui;
-use leafport_core::library::{Settings, Theme};
+use leafport_app::{Settings, Theme};
 
 /// Map the stored theme to egui's preference.
-pub fn theme_preference(theme: Theme) -> egui::ThemePreference {
+pub fn theme_preference(theme: &Theme) -> egui::ThemePreference {
     match theme {
         Theme::System => egui::ThemePreference::System,
         Theme::Light => egui::ThemePreference::Light,
@@ -12,7 +12,7 @@ pub fn theme_preference(theme: Theme) -> egui::ThemePreference {
     }
 }
 
-fn theme_label(theme: Theme) -> &'static str {
+fn theme_label(theme: &Theme) -> &'static str {
     match theme {
         Theme::System => "System",
         Theme::Light => "Light",
@@ -21,10 +21,21 @@ fn theme_label(theme: Theme) -> &'static str {
 }
 
 /// The open Settings window and its current edits.
-#[derive(Default)]
 pub struct SettingsView {
     pub open: bool,
     draft: Settings,
+}
+
+impl Default for SettingsView {
+    fn default() -> Self {
+        Self {
+            open: false,
+            draft: Settings {
+                books_dir: None,
+                theme: Theme::System,
+            },
+        }
+    }
 }
 
 impl SettingsView {
@@ -35,11 +46,13 @@ impl SettingsView {
     }
 
     /// Draw the window. Returns edited settings as soon as a control changes.
+    /// `books_dir` is the effective books folder, shown while no folder was chosen.
     /// While `busy`, books folder selection is disabled.
     pub fn window(
         &mut self,
         ctx: &egui::Context,
         current: &Settings,
+        books_dir: Option<&str>,
         busy: bool,
     ) -> Option<Settings> {
         let mut open = self.open;
@@ -52,16 +65,18 @@ impl SettingsView {
                 ui.horizontal(|ui| {
                     let shown = self
                         .draft
-                        .books_dir_or_default()
-                        .map(|dir| dir.display().to_string())
-                        .unwrap_or_else(|| "(none)".into());
+                        .books_dir
+                        .as_deref()
+                        .or(books_dir)
+                        .unwrap_or("(none)")
+                        .to_owned();
                     ui.monospace(shown);
                     if ui
                         .add_enabled(!busy, egui::Button::new("Choose…"))
                         .clicked()
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
-                        self.draft.books_dir = Some(dir);
+                        self.draft.books_dir = Some(dir.to_string_lossy().into_owned());
                     }
                 });
                 ui.weak("Existing title folders are not moved.");
@@ -72,14 +87,11 @@ impl SettingsView {
                 ui.horizontal(|ui| {
                     ui.label("Theme");
                     egui::ComboBox::from_id_salt("theme")
-                        .selected_text(theme_label(self.draft.theme))
+                        .selected_text(theme_label(&self.draft.theme))
                         .show_ui(ui, |ui| {
                             for theme in [Theme::System, Theme::Light, Theme::Dark] {
-                                ui.selectable_value(
-                                    &mut self.draft.theme,
-                                    theme,
-                                    theme_label(theme),
-                                );
+                                let label = theme_label(&theme);
+                                ui.selectable_value(&mut self.draft.theme, theme, label);
                             }
                         });
                 });
