@@ -357,38 +357,28 @@ fn successful_operator_setup_is_retained_after_a_download_failure() {
 }
 
 #[test]
-fn unknown_operator_user_reauthorizes_once_before_retrying_fulfillment() {
+fn unknown_operator_user_forgets_the_operator_without_retrying() {
     let root = tempdir();
     let lib = Library::open(root.path()).unwrap();
     let mut state = operator_activation();
+    assert!(
+        state
+            .operator_urls
+            .contains(&"https://op.example/fulfillment".to_owned())
+    );
     let acsm = acsm_xml("urn:uuid:reset-operator", "Reset operator");
-    let transport = FakeTransport::new()
-        .respond(
-            "/Fulfill",
-            400,
-            r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_USER_UNKNOWN"/>"#,
-        )
-        .respond(
-            "/Auth",
-            200,
-            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
-        )
-        .respond(
-            "/InitLicenseService",
-            200,
-            r#"<success xmlns="http://ns.adobe.com/adept"/>"#,
-        )
-        // A repeated rejection must return, rather than retrying indefinitely.
-        .respond(
-            "/Fulfill",
-            400,
-            r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_USER_UNKNOWN"/>"#,
-        );
+    let transport = FakeTransport::new().respond(
+        "/Fulfill",
+        400,
+        r#"<error xmlns="http://ns.adobe.com/adept" data="E_LIC_USER_UNKNOWN"/>"#,
+    );
     let error = lib
         .sync_item(acsm.as_bytes(), &mut state, &transport)
         .unwrap_err();
     assert!(error.to_string().contains("E_LIC_USER_UNKNOWN"));
-    assert_eq!(transport.requests.lock().unwrap().len(), 4);
+    // One Fulfill and nothing else; the next sync initializes the operator again.
+    assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    assert!(state.operator_urls.is_empty());
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 

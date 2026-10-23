@@ -138,35 +138,30 @@ impl Library {
         let summary = acsm_summary(acsm_bytes)?;
         let acsm = Acsm::parse(String::from_utf8_lossy(acsm_bytes).into_owned())?;
         fulfillment::prepare_operator(transport, activation, &acsm)?;
-        let fulfill = |state: &ActivationState| {
-            fulfillment::perform_fulfillment(
-                transport,
-                &acsm,
-                &state.user,
-                &state.device,
-                DEVICE_TYPE,
-                std::slice::from_ref(&target_descriptor(state)),
-                &state.keys.authentication,
-            )
-        };
-        let result = fulfill(activation);
-        // An operator needs reinitializing on this specific rejection.
-        // Transport failures and unrelated service errors must never replay a token.
+        let result = fulfillment::perform_fulfillment(
+            transport,
+            &acsm,
+            &activation.user,
+            &activation.device,
+            DEVICE_TYPE,
+            std::slice::from_ref(&target_descriptor(activation)),
+            &activation.keys.authentication,
+        );
+        // This rejection means the operator needs reinitializing. Leafport does not
+        // retry: it forgets the operator, so the next sync the user starts initializes
+        // it again.
         let unknown_user = matches!(
             &result,
             Err(fulfillment::FulfillError::Response(
                 fulfillment::FulfillResponseError::Service { xml }
             )) if cloud::adept_error_data(xml).is_some_and(|data| data.starts_with("E_LIC_USER_UNKNOWN"))
         );
-        let fulfilled = if unknown_user {
+        if unknown_user {
             activation.operator_urls.retain(|url| {
                 url.trim_end_matches('/') != acsm.operator_url().trim_end_matches('/')
             });
-            fulfillment::prepare_operator(transport, activation, &acsm)?;
-            fulfill(activation)?
-        } else {
-            result?
-        };
+        }
+        let fulfilled = result?;
         let f = fulfilled.fulfillment;
         let body = fulfilled.body;
 
