@@ -774,6 +774,7 @@ pub fn perform_fulfillment(
     let request = acsm
         .signed_request(user, device, device_type, descriptors, key)
         .map_err(FulfillError::Build)?;
+    client.before_fulfill().map_err(FulfillError::Transport)?;
     let response = client
         .post_adept(&fulfill_url(acsm.operator_url()), request)
         .map_err(FulfillError::Transport)?;
@@ -793,7 +794,7 @@ pub fn perform_fulfillment(
     let download_url =
         require_web_url(&fulfillment.download_url).map_err(|_| FulfillError::BadDownloadUrl)?;
     let download = client
-        .fetch(download_url.as_str(), MAX_BOOK_BYTES)
+        .download(download_url.as_str(), MAX_BOOK_BYTES)
         .map_err(FulfillError::Download)?;
     if !download.status.is_success() {
         return Err(FulfillError::DownloadHttp {

@@ -326,6 +326,86 @@ fn perform_fulfillment_runs_over_a_fake_transport() {
 }
 
 #[test]
+fn perform_fulfillment_downloads_the_book_through_transport_download() {
+    use leafport_core::service::{AdeptResponse, ServiceError, Transport};
+    use std::sync::Mutex;
+
+    /// Delegates to the fake, recording which URLs went through `download`.
+    struct Downloads {
+        inner: common::FakeTransport,
+        downloaded: Mutex<Vec<String>>,
+    }
+    impl Transport for Downloads {
+        fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+            self.inner.post_adept(url, xml)
+        }
+        fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+            self.inner.fetch(url, max_bytes)
+        }
+        fn download(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+            self.downloaded.lock().unwrap().push(url.to_owned());
+            self.inner.fetch(url, max_bytes)
+        }
+    }
+
+    let acsm = Acsm::parse(acsm_with_operator("https://op.example/fulfillment")).unwrap();
+    let ok = r#"<fulfillmentResult xmlns="http://ns.adobe.com/adept"><resourceItemInfo><resource>urn:uuid:b</resource><src>https://dl.example/b.epub</src></resourceItemInfo></fulfillmentResult>"#;
+    let transport = Downloads {
+        inner: common::FakeTransport::new()
+            .respond("/fulfillment/Fulfill", 200, ok)
+            .respond("/b.epub", 200, b"BOOK".to_vec()),
+        downloaded: Mutex::new(Vec::new()),
+    };
+    let book = perform_fulfillment(
+        &transport,
+        &acsm,
+        "u",
+        "d",
+        "standalone",
+        &[],
+        common::key(),
+    )
+    .unwrap();
+    assert_eq!(book.body, b"BOOK");
+    assert_eq!(
+        *transport.downloaded.lock().unwrap(),
+        ["https://dl.example/b.epub"]
+    );
+}
+
+#[test]
+fn perform_fulfillment_sends_nothing_when_before_fulfill_refuses() {
+    use leafport_core::service::{AdeptResponse, ServiceError, Transport};
+
+    struct Refusing(common::FakeTransport);
+    impl Transport for Refusing {
+        fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+            self.0.post_adept(url, xml)
+        }
+        fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+            self.0.fetch(url, max_bytes)
+        }
+        fn before_fulfill(&self) -> Result<(), ServiceError> {
+            Err(ServiceError::Cancelled)
+        }
+    }
+
+    let acsm = Acsm::parse(acsm_with_operator("https://op.example/fulfillment")).unwrap();
+    let transport = Refusing(common::FakeTransport::new());
+    let result = perform_fulfillment(
+        &transport,
+        &acsm,
+        "u",
+        "d",
+        "standalone",
+        &[],
+        common::key(),
+    );
+    assert!(result.is_err());
+    assert!(transport.0.requests.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_failed_book_download_names_its_host_and_error_page() {
     let acsm = Acsm::parse(acsm_with_operator("https://op.example/fulfillment")).unwrap();
     let ok = r#"<fulfillmentResult xmlns="http://ns.adobe.com/adept"><resourceItemInfo><resource>urn:uuid:b</resource><src>https://dl.example/b.pdf?token=SECRET</src></resourceItemInfo></fulfillmentResult>"#;

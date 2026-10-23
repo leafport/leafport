@@ -11,6 +11,8 @@ pub const AUTHENTICATION_SERVICE_INFO: &str =
 #[derive(Debug)]
 pub enum ServiceError {
     ResponseTooLarge,
+    /// The client's cancel flag was set; the request was not sent or not finished.
+    Cancelled,
     /// The server answered 429 Too Many Requests. Not retried: retrying only prolongs
     /// a rate limit or block.
     RateLimited {
@@ -26,6 +28,7 @@ impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ResponseTooLarge => write!(f, "service response exceeds the local size limit"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::RateLimited { host } => write!(
                 f,
                 "{host} is limiting requests from this network (HTTP 429). Try again later."
@@ -40,11 +43,14 @@ impl fmt::Display for ServiceError {
 
 impl Error for ServiceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        if matches!(self, Self::ResponseTooLarge | Self::RateLimited { .. }) {
+        if matches!(
+            self,
+            Self::ResponseTooLarge | Self::Cancelled | Self::RateLimited { .. }
+        ) {
             return None;
         }
         Some(match self {
-            Self::ResponseTooLarge | Self::RateLimited { .. } => unreachable!(),
+            Self::ResponseTooLarge | Self::Cancelled | Self::RateLimited { .. } => unreachable!(),
             Self::Http(error) => error,
             Self::Read(error) => error,
             Self::Utf8(error) => error,
@@ -55,6 +61,9 @@ impl Error for ServiceError {
 
 pub struct ServiceClient {
     http: reqwest::blocking::Client,
+    /// Once cancelled, requests fail with `Cancelled`: before sending, between download
+    /// chunks, and during retry waits.
+    cancel: Option<CancelToken>,
 }
 
 /// Retain error bodies: ADEPT services may return protocol XML on HTTP failure.
@@ -67,11 +76,71 @@ pub struct AdeptResponse {
 pub trait Transport: Send + Sync {
     fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError>;
     fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError>;
+    /// Download a fulfilled book. A transport that reports download progress overrides
+    /// this; by default it is a plain `fetch`.
+    fn download(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        self.fetch(url, max_bytes)
+    }
+    /// Called right before the Fulfill request. Fulfilling counts as a download with the
+    /// store, so a sync can no longer be cancelled from here on; an error aborts first.
+    fn before_fulfill(&self) -> Result<(), ServiceError> {
+        Ok(())
+    }
 }
+
+/// Shared cancel state of one sync: running, cancelled, or committed once Fulfill is
+/// about to be sent. Cancelling and committing exclude each other, so a cancel that
+/// arrives too late has no effect.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+const RUNNING: u8 = 0;
+const CANCELLED: u8 = 1;
+const COMMITTED: u8 = 2;
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn switch(&self, to: u8) -> Result<u8, u8> {
+        use std::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(RUNNING, to, Ordering::AcqRel, Ordering::Acquire)
+    }
+
+    /// Ask the sync to stop. False, and no effect, once it is committed.
+    pub fn cancel(&self) -> bool {
+        matches!(self.switch(CANCELLED), Ok(_) | Err(CANCELLED))
+    }
+
+    /// Pass the point of no return. False when the sync was cancelled first.
+    pub fn commit(&self) -> bool {
+        matches!(self.switch(COMMITTED), Ok(_) | Err(COMMITTED))
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == CANCELLED
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == COMMITTED
+    }
+}
+
+/// Download progress: bytes received so far, and the total when the server reports it.
+pub type Progress<'a> = &'a dyn Fn(u64, Option<u64>);
 
 impl Transport for ServiceClient {
     fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
         ServiceClient::post_adept(self, url, xml)
+    }
+
+    fn before_fulfill(&self) -> Result<(), ServiceError> {
+        match &self.cancel {
+            Some(token) if !token.commit() => Err(ServiceError::Cancelled),
+            _ => Ok(()),
+        }
     }
 
     fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
@@ -96,9 +165,23 @@ fn reject_rate_limit(
 }
 
 impl ServiceClient {
+    /// Make requests fail with `Cancelled` once `token` is cancelled.
+    pub fn with_cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    fn check_cancel(&self) -> Result<(), ServiceError> {
+        match &self.cancel {
+            Some(token) if token.is_cancelled() => Err(ServiceError::Cancelled),
+            _ => Ok(()),
+        }
+    }
+
     /// Blocking transport for already constructed ADEPT request XML.
     /// No automatic retry: fulfillment may consume a single-use token.
     pub fn post_adept(&self, url: &str, xml: String) -> Result<AdeptResponse, ServiceError> {
+        self.check_cancel()?;
         let response = self
             .http
             .post(url)
@@ -126,17 +209,41 @@ impl ServiceClient {
     /// Bounded by `max_bytes`; the status and body are retained so an error page is
     /// visible to the caller rather than silently treated as book content.
     pub fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
+        self.download_with_progress(url, max_bytes, &|_, _| {})
+    }
+
+    /// `fetch`, reporting the bytes read after each chunk. Once the body is complete,
+    /// the final report gives the received length as the total, even when the server
+    /// sent no Content-Length.
+    pub fn download_with_progress(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        progress: Progress<'_>,
+    ) -> Result<AdeptResponse, ServiceError> {
+        self.check_cancel()?;
         let response = self.http.get(url).send().map_err(ServiceError::Http)?;
         let response = reject_rate_limit(response)?;
         let status = response.status();
+        let total = response.content_length();
+        let mut reader = response.take(max_bytes as u64 + 1);
         let mut body = Vec::new();
-        response
-            .take(max_bytes as u64 + 1)
-            .read_to_end(&mut body)
-            .map_err(ServiceError::Read)?;
-        if body.len() > max_bytes {
-            return Err(ServiceError::ResponseTooLarge);
+        let mut chunk = vec![0; 64 * 1024];
+        loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(ServiceError::Read(error)),
+            };
+            self.check_cancel()?;
+            body.extend_from_slice(&chunk[..read]);
+            if body.len() > max_bytes {
+                return Err(ServiceError::ResponseTooLarge);
+            }
+            progress(body.len() as u64, total);
         }
+        progress(body.len() as u64, Some(body.len() as u64));
         Ok(AdeptResponse { status, body })
     }
 
@@ -166,7 +273,7 @@ impl ServiceClient {
             }))
             .build()
             .map_err(ServiceError::Http)?;
-        Ok(Self { http })
+        Ok(Self { http, cancel: None })
     }
 
     /// Blocking operation: desktop callers must run this off the UI thread.
@@ -265,5 +372,93 @@ mod tests {
                 "{head}"
             );
         }
+    }
+
+    fn cancelled_flag() -> CancelToken {
+        let token = CancelToken::new();
+        assert!(token.cancel());
+        token
+    }
+
+    #[test]
+    fn a_cancel_after_the_commit_has_no_effect() {
+        let token = CancelToken::new();
+        assert!(token.commit());
+        assert!(!token.cancel());
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn a_commit_after_a_cancel_fails() {
+        let token = CancelToken::new();
+        assert!(token.cancel());
+        assert!(!token.commit());
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn a_committed_client_ignores_a_later_cancel() {
+        let token = CancelToken::new();
+        let client = ServiceClient::new().unwrap().with_cancel(token.clone());
+        assert!(client.before_fulfill().is_ok());
+        token.cancel();
+        // Sent, and failing only because nothing listens there.
+        assert!(matches!(
+            client.fetch("http://127.0.0.1:9/x", 1024),
+            Err(ServiceError::Http(_))
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_client_refuses_to_fulfill() {
+        let client = ServiceClient::new().unwrap().with_cancel(cancelled_flag());
+        assert!(matches!(
+            client.before_fulfill(),
+            Err(ServiceError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_client_sends_nothing() {
+        // Nothing listens here; a request that was sent would fail with Http instead.
+        let client = ServiceClient::new().unwrap().with_cancel(cancelled_flag());
+        let url = "http://127.0.0.1:9/x";
+        assert!(matches!(
+            client.fetch(url, 1024),
+            Err(ServiceError::Cancelled)
+        ));
+        assert!(matches!(
+            client.post_adept(url, String::new()),
+            Err(ServiceError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn a_download_stops_at_the_next_chunk_once_cancelled() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/book", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let body = vec![0u8; 4 * 1024 * 1024];
+            let _ = stream.write_all(
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(),
+            );
+            let _ = stream.write_all(&body);
+        });
+        let token = CancelToken::new();
+        let client = ServiceClient::new().unwrap().with_cancel(token.clone());
+        let result = client.download_with_progress(&url, 8 * 1024 * 1024, &|_, _| {
+            token.cancel();
+        });
+        assert!(matches!(result, Err(ServiceError::Cancelled)));
+        drop(client);
+        server.join().unwrap();
     }
 }
