@@ -11,10 +11,11 @@ use leafport_core::library::{
     self, Item, ItemState, Library, Metadata, SyncOutcome, load_cache, merge,
 };
 use leafport_core::service::CancelToken;
+use leafport_core::vendors::VendorCatalog;
 
 use crate::ops::{Ops, Paths, SyncHooks};
 use crate::rows::{self, Busy, Job, StatusInputs};
-use crate::{AppError, Event, Listener, Row, Settings, Snapshot, Status, Theme};
+use crate::{AppError, Event, Listener, Provider, Row, Settings, Snapshot, Status, Theme};
 
 /// The most banner messages kept; older ones drop off.
 const BANNER_LINES: usize = 5;
@@ -95,6 +96,22 @@ pub(crate) enum Msg {
     ClearBanner,
     /// Settings changed under the lock; publish what changed.
     Publish,
+    /// Load the sign-in provider catalog, unless that already runs.
+    LoadProviders,
+    /// The loaded provider catalog.
+    Providers(Result<VendorCatalog, String>),
+    /// Sign in. The password lives only in this message and the worker that gets it.
+    SignIn {
+        method: String,
+        username: String,
+        password: String,
+    },
+    /// A finished sign-in: the account label.
+    SignedIn(Result<String, String>),
+    /// Forget the stored activation and the cloud list.
+    SignOut,
+    /// A finished sign-out.
+    SignedOut(Result<(), String>),
 }
 
 /// Everything the reactor owns. `App` reads only the `emitted_*` fields and the settings.
@@ -126,6 +143,11 @@ pub(crate) struct State {
     /// The signed-in account label.
     pub user: Option<String>,
     pub refreshing: bool,
+    /// The sign-in providers; kept when a later load fails and across sign-out.
+    pub catalog: Arc<VendorCatalog>,
+    pub loading_providers: bool,
+    pub signing_in: bool,
+    pub sign_in_error: Option<String>,
     /// Bumped on sign-in and sign-out; a refresh started under an older value is stale.
     pub generation: u64,
     /// The rows the listener has last been told about.
@@ -197,6 +219,10 @@ impl State {
             banner,
             user,
             refreshing: false,
+            catalog: Arc::new(VendorCatalog::new()),
+            loading_providers: false,
+            signing_in: false,
+            sign_in_error: None,
             generation: 0,
             emitted_rows: vec![],
             emitted_status: rows::status(&StatusInputs {
@@ -332,6 +358,12 @@ impl State {
         add_banner(&mut self.banner, message);
     }
 
+    /// Start a new account generation: in-flight refreshes become stale and a new one may start.
+    pub(crate) fn new_generation(&mut self) {
+        self.generation += 1;
+        self.refreshing = false;
+    }
+
     pub(crate) fn remove_cache(&mut self) {
         if let Some(path) = &self.paths.cache {
             match std::fs::remove_file(path) {
@@ -364,6 +396,9 @@ impl State {
             banner: &self.banner,
             books_dir: (!root.as_os_str().is_empty()).then_some(root.as_path()),
         });
+        status.loading_providers = self.loading_providers;
+        status.signing_in = self.signing_in;
+        status.sign_in_error = self.sign_in_error.clone();
         status.importing = matches!(self.running, Some(Job::Import(_)));
         status.job_running = self.running.is_some();
         status.can_sync_all = self.user.is_some() && !self.unsynced().is_empty();
@@ -557,6 +592,96 @@ impl Reactor {
             Msg::AddMessage(message) => state.add_banner(message),
             Msg::ClearBanner => state.banner.clear(),
             Msg::Publish => {}
+            Msg::LoadProviders => {
+                if state.loading_providers {
+                    return;
+                }
+                state.loading_providers = true;
+                let ops = self.ops.clone();
+                self.spawn(move || ops.load_providers(), Msg::Providers);
+            }
+            Msg::Providers(result) => {
+                state.loading_providers = false;
+                events.push(Event::Providers {
+                    result: match result {
+                        Ok(catalog) => {
+                            let providers = catalog
+                                .entries()
+                                .iter()
+                                .map(|vendor| Provider {
+                                    name: vendor.name.clone(),
+                                    method: vendor.method.clone(),
+                                    node_id: vendor.node_id.clone(),
+                                    sign_in_type: vendor.sign_in_type.clone(),
+                                })
+                                .collect();
+                            state.catalog = Arc::new(catalog);
+                            Ok(providers)
+                        }
+                        // The previous catalog stays.
+                        Err(e) => Err(e),
+                    },
+                });
+            }
+            Msg::SignIn {
+                method,
+                username,
+                password,
+            } => {
+                if state.signing_in {
+                    return;
+                }
+                state.sign_in_error = None;
+                let info = state.catalog.service_info();
+                if info.auth_url.is_none() || info.certificate.as_deref().is_none_or(str::is_empty)
+                {
+                    state.sign_in_error =
+                        Some("Discovery has no authentication URL or certificate yet.".into());
+                    return;
+                }
+                if username.is_empty() || password.is_empty() {
+                    state.sign_in_error = Some("Enter a username and password.".into());
+                    return;
+                }
+                state.signing_in = true;
+                let catalog = state.catalog.clone();
+                let ops = self.ops.clone();
+                // The credentials move into the worker and are dropped there.
+                self.spawn(
+                    move || ops.sign_in(&catalog, &method, username, password),
+                    Msg::SignedIn,
+                );
+            }
+            Msg::SignedIn(result) => {
+                state.signing_in = false;
+                match result {
+                    Ok(user) => {
+                        state.sign_in_error = None;
+                        state.user = Some(user);
+                        state.new_generation();
+                    }
+                    Err(e) => state.sign_in_error = Some(format!("Sign-in failed: {e}")),
+                }
+            }
+            Msg::SignOut => {
+                let ops = self.ops.clone();
+                self.spawn(move || ops.sign_out(), Msg::SignedOut);
+            }
+            Msg::SignedOut(result) => match result {
+                Ok(()) => {
+                    state.user = None;
+                    state.new_generation();
+                    state.remove_cache();
+                    state.cloud.clear();
+                    // Queued cloud rows have no ACSM once the list is gone, and old
+                    // failures would mark the remaining Local rows Failed.
+                    state.queue.clear();
+                    state.failures.clear();
+                    state.row_errors.clear();
+                    state.remerge();
+                }
+                Err(e) => state.add_banner(format!("Sign-out failed: {e}")),
+            },
             Msg::Imported(result) => {
                 state.running = None;
                 match result {

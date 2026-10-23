@@ -115,6 +115,30 @@ impl App {
         result
     }
 
+    /// Load the sign-in providers; the result arrives as `Event::Providers`. Does nothing
+    /// while a load runs. A failed load keeps the previous providers.
+    pub fn load_providers(&self) {
+        self.send(Msg::LoadProviders);
+    }
+
+    /// Sign in with the provider `method`. Needs loaded providers; otherwise
+    /// `Status.sign_in_error` says so. The password is passed on to the worker and never
+    /// kept.
+    pub fn sign_in(&self, method: String, username: String, password: String) {
+        self.send(Msg::SignIn {
+            method,
+            username,
+            password,
+        });
+    }
+
+    /// Forget the stored activation. On success the cloud list, its cache, the queued
+    /// syncs and the failures are cleared; synced folders stay as local rows. On failure
+    /// the user stays signed in and the banner says why.
+    pub fn sign_out(&self) {
+        self.send(Msg::SignOut);
+    }
+
     /// Empty the banner.
     pub fn clear_banner(&self) {
         self.send(Msg::ClearBanner);
