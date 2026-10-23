@@ -390,3 +390,92 @@ fn banner_capped_and_cleared() {
     app.clear_banner();
     recorder.wait_for(|_| app.snapshot().status.banner.is_empty());
 }
+
+#[test]
+fn settings_busy_during_return() {
+    let (dir, app, script, recorder, folder, metadata) = loan_app();
+    app.return_loan(K.into());
+    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
+    recorder.wait_for(|_| app.snapshot().status.job_running);
+    let moved = Settings {
+        books_dir: Some(dir.path().join("Other").to_string_lossy().into_owned()),
+        theme: Theme::System,
+    };
+    assert_eq!(app.set_settings(moved), Err(AppError::Busy));
+    let saved = leafport_core::library::Settings::load(&dir.path().join("settings.yaml")).unwrap();
+    assert_eq!(saved.books_dir, Some(dir.path().join("Books")));
+    script
+        .return_loan
+        .send(Ok(returned(&folder, metadata)))
+        .unwrap();
+    recorder.wait_for(|_| !app.snapshot().status.job_running);
+}
+
+#[test]
+fn remove_after_return_deletes_only_captured_folder() {
+    let (dir, app, script, recorder, folder, metadata) = loan_app();
+    app.remove(K.into(), true);
+    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
+    // While the return runs, the title folder moves and a rescan picks up its new place.
+    let moved = dir.path().join("Books").join("A2");
+    std::fs::rename(&folder, &moved).unwrap();
+    app.import_acsm(
+        dir.path()
+            .join("missing.acsm")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    recorder.wait_for(|_| {
+        let snapshot = app.snapshot();
+        snapshot
+            .status
+            .banner
+            .iter()
+            .any(|m| m.starts_with("Import failed: "))
+            && snapshot.rows.iter().any(|r| {
+                r.key == K && r.folder.as_deref() == Some(moved.to_string_lossy().as_ref())
+            })
+    });
+    let done = returned(&moved, metadata);
+    script.return_loan.send(Ok(done)).unwrap();
+    recorder.wait_for(|_| {
+        row_of(&app, K).is_some_and(|r| r.activity == Activity::Idle && r.state != RowState::OnLoan)
+    });
+    assert!(moved.exists(), "a folder the user did not confirm stays");
+}
+
+/// Panics on its first event, then forwards to a recorder.
+struct PanicsOnce {
+    panicked: std::sync::atomic::AtomicBool,
+    recorder: Recorder,
+}
+
+impl Listener for PanicsOnce {
+    fn on_event(&self, event: Event) {
+        if !self
+            .panicked
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            panic!("listener failed");
+        }
+        self.recorder.on_event(event);
+    }
+}
+
+#[test]
+fn panicking_listener_keeps_reactor() {
+    let dir = tempdir();
+    let paths = settings_in(dir.path());
+    let (ops, _script) = FakeOps::new(Some("user@x"));
+    let recorder = Recorder::new();
+    let listener = PanicsOnce {
+        panicked: Default::default(),
+        recorder: recorder.clone(),
+    };
+    let app = App::with_ops(ops, paths, Box::new(listener));
+    app.add_message("one".into());
+    app.add_message("two".into());
+    recorder.wait_for(|e| {
+        common::last_status(e).is_some_and(|s| s.banner.contains(&"two".to_string()))
+    });
+}

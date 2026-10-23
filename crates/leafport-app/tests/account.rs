@@ -226,6 +226,11 @@ fn sign_in_success_bumps_generation() {
     s.app.refresh();
     assert_eq!(s.script.next_call(), Call::Refresh);
     s.wait_status(|st| st.refreshing);
+    // Sign-in is ignored while signed in, so switch accounts through a sign-out.
+    s.app.sign_out();
+    assert_eq!(s.script.next_call(), Call::SignOut);
+    s.script.sign_out.send(Ok(())).unwrap();
+    s.wait_status(|st| st.user.is_none());
     s.load();
     s.app
         .sign_in("vendor1".into(), "me".into(), "secret".into());
@@ -233,13 +238,13 @@ fn sign_in_success_bumps_generation() {
     s.script.sign_in.send(Ok("user@x".into())).unwrap();
     // The new generation resets `refreshing`, so a new refresh may start.
     s.wait_status(|st| st.user.as_deref() == Some("user@x") && !st.refreshing);
-    assert!(s.cache().exists());
 
-    // The refresh that started before the sign-in finishes: its result is discarded.
+    // The refresh that started under the old account finishes: its result is discarded,
+    // and the cache it may have rewritten is removed.
+    std::fs::write(s.cache(), cache_xml(&[(B, "B")])).unwrap();
     s.script.refresh.send(Ok(vec![record(B, "B")])).unwrap();
     until(|| !s.cache().exists());
     assert!(s.row(B).is_none());
-    assert!(s.row(A).is_some());
 
     // A fresh refresh works again.
     s.app.refresh();
@@ -312,4 +317,41 @@ fn sign_out_failure() {
     assert_eq!(s.status().user.as_deref(), Some("user@x"));
     assert!(s.cache().exists());
     assert!(s.row(A).is_some());
+}
+
+#[test]
+fn sign_out_during_sign_in_ignored() {
+    let s = signed_out();
+    s.load();
+    s.app
+        .sign_in("vendor1".into(), "me".into(), "secret".into());
+    s.script.next_call();
+    s.wait_status(|st| st.signing_in);
+    s.app.sign_out();
+    s.script.no_call_within(200);
+    s.script.sign_in.send(Ok("user@x".into())).unwrap();
+    s.wait_status(|st| st.user.as_deref() == Some("user@x") && !st.signing_in);
+    s.script.no_call_within(200);
+    assert_eq!(s.status().user.as_deref(), Some("user@x"));
+}
+
+#[test]
+fn sign_in_while_signed_in_ignored() {
+    let s = start_with(Some("user@x"), &[], |_| {});
+    s.load();
+    s.app
+        .sign_in("vendor1".into(), "me".into(), "secret".into());
+    s.script.no_call_within(200);
+    assert!(!s.status().signing_in);
+}
+
+#[test]
+fn second_sign_out_ignored() {
+    let s = start_with(Some("user@x"), &[], |_| {});
+    s.app.sign_out();
+    assert_eq!(s.script.next_call(), Call::SignOut);
+    s.app.sign_out();
+    s.script.no_call_within(200);
+    s.script.sign_out.send(Ok(())).unwrap();
+    s.wait_status(|st| st.user.is_none());
 }

@@ -115,7 +115,7 @@ impl App {
     /// called from `Listener::on_event`.
     ///
     /// Returns `AppError::Busy` and saves nothing when the books folder changes while a
-    /// sync or import runs, and `AppError::Save` when the file cannot be written (the
+    /// sync, import or loan return runs, and `AppError::Save` when the file cannot be written (the
     /// settings still apply for this session).
     pub fn set_settings(&self, settings: Settings) -> Result<(), AppError> {
         let result = state::lock(&self.state).apply_settings(settings);
@@ -130,8 +130,8 @@ impl App {
     }
 
     /// Sign in with the provider `method`. Needs loaded providers; otherwise
-    /// `Status.sign_in_error` says so. The password is passed on to the worker and never
-    /// kept.
+    /// `Status.sign_in_error` says so. Does nothing while signed in or while a sign-in or
+    /// sign-out runs. The password is passed on to the worker and never kept.
     pub fn sign_in(&self, method: String, username: String, password: String) {
         self.send(Msg::SignIn {
             method,
@@ -142,7 +142,8 @@ impl App {
 
     /// Forget the stored activation. On success the cloud list, its cache, the queued
     /// syncs and the failures are cleared; synced folders stay as local rows. On failure
-    /// the user stays signed in and the banner says why.
+    /// the user stays signed in and the banner says why. Does nothing while a sign-in or
+    /// sign-out runs.
     pub fn sign_out(&self) {
         self.send(Msg::SignOut);
     }

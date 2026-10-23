@@ -136,8 +136,9 @@ pub(crate) struct State {
     pub returning: HashSet<String>,
     /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
     pub row_errors: HashMap<String, String>,
-    /// Rows whose title folder is deleted once their running return succeeds.
-    pub remove_after_return: HashSet<String>,
+    /// Rows whose title folder is deleted once their running return succeeds, with the
+    /// folder the user confirmed when asking.
+    pub remove_after_return: HashMap<String, PathBuf>,
     /// Recent unique messages, oldest first.
     pub banner: Vec<String>,
     /// The signed-in account label.
@@ -147,6 +148,7 @@ pub(crate) struct State {
     pub catalog: Arc<VendorCatalog>,
     pub loading_providers: bool,
     pub signing_in: bool,
+    pub signing_out: bool,
     pub sign_in_error: Option<String>,
     /// Bumped on sign-in and sign-out; a refresh started under an older value is stale.
     pub generation: u64,
@@ -215,13 +217,14 @@ impl State {
             committed: false,
             returning: HashSet::new(),
             row_errors: HashMap::new(),
-            remove_after_return: HashSet::new(),
+            remove_after_return: HashMap::new(),
             banner,
             user,
             refreshing: false,
             catalog: Arc::new(VendorCatalog::new()),
             loading_providers: false,
             signing_in: false,
+            signing_out: false,
             sign_in_error: None,
             generation: 0,
             emitted_rows: vec![],
@@ -282,14 +285,22 @@ impl State {
     /// Delete the title folder of the row with `key` and rescan. The book stays in the
     /// cloud list.
     pub(crate) fn remove_folder(&mut self, key: &str) {
-        let Some(folder) = self
-            .items
+        let Some(folder) = self.folder_of(key) else {
+            return;
+        };
+        self.remove_path(key, &folder);
+    }
+
+    /// The title folder of the row with `key`.
+    pub(crate) fn folder_of(&self, key: &str) -> Option<PathBuf> {
+        self.items
             .iter()
             .find(|item| item.key == key)
             .and_then(|item| item.folder.clone())
-        else {
-            return;
-        };
+    }
+
+    /// Delete `folder`, the title folder of the row with `key`, and rescan.
+    fn remove_path(&mut self, key: &str, folder: &std::path::Path) {
         // Only a title folder directly inside the books folder is ever deleted.
         if folder.parent() != Some(self.library.root.as_path()) {
             self.add_banner(format!(
@@ -298,7 +309,7 @@ impl State {
             ));
             return;
         }
-        match std::fs::remove_dir_all(&folder) {
+        match std::fs::remove_dir_all(folder) {
             Ok(()) => {
                 self.failures.remove(key);
                 self.row_errors.remove(key);
@@ -309,15 +320,24 @@ impl State {
     }
 
     /// Save `new`, and on a books folder change open the new folder. The theme is applied
-    /// by the UI. A folder change while a sync or import runs is refused before anything
-    /// is saved. A failed save is reported but the settings still apply in memory, as in
+    /// by the UI. A folder change while a sync, import or loan return runs is refused
+    /// before anything is saved. A failed save is reported but the settings still apply in memory, as in
     /// the egui app.
     pub(crate) fn apply_settings(&mut self, new: Settings) -> Result<(), AppError> {
         let mut next = self.settings.clone();
-        next.books_dir = new
-            .books_dir
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from);
+        next.books_dir = match new.books_dir.filter(|dir| !dir.is_empty()) {
+            // The public form is lossy; an unchanged folder keeps its exact stored path.
+            Some(dir)
+                if self
+                    .settings
+                    .books_dir
+                    .as_deref()
+                    .is_some_and(|stored| stored.to_string_lossy() == dir) =>
+            {
+                self.settings.books_dir.clone()
+            }
+            dir => dir.map(PathBuf::from),
+        };
         next.theme = match new.theme {
             Theme::System => library::Theme::System,
             Theme::Light => library::Theme::Light,
@@ -326,7 +346,7 @@ impl State {
         let old_root = self.settings.books_dir_or_default();
         let new_root = next.books_dir_or_default();
         let folder_changes = new_root != old_root;
-        if folder_changes && self.running.is_some() {
+        if folder_changes && self.job_running() {
             return Err(AppError::Busy);
         }
         let saved = match &self.paths.settings {
@@ -356,6 +376,11 @@ impl State {
 
     pub(crate) fn add_banner(&mut self, message: String) {
         add_banner(&mut self.banner, message);
+    }
+
+    /// Whether a sync, import or loan return runs; the books folder cannot change then.
+    pub(crate) fn job_running(&self) -> bool {
+        self.running.is_some() || !self.returning.is_empty()
     }
 
     /// Start a new account generation: in-flight refreshes become stale and a new one may start.
@@ -403,7 +428,7 @@ impl State {
         status.sign_in_ready =
             info.auth_url.is_some() && info.certificate.as_deref().is_some_and(|c| !c.is_empty());
         status.importing = matches!(self.running, Some(Job::Import(_)));
-        status.job_running = self.running.is_some();
+        status.job_running = self.job_running();
         status.can_sync_all = self.user.is_some() && !self.unsynced().is_empty();
         status.can_cancel_all =
             self.running_cancellable() || self.queue.iter().any(|job| matches!(job, Job::Sync(_)));
@@ -482,7 +507,10 @@ impl Reactor {
                 events
             };
             for event in events {
-                self.listener.on_event(event);
+                // A panicking listener must not stop the reactor; the next event still goes out.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.listener.on_event(event)
+                }));
             }
         }
     }
@@ -571,7 +599,10 @@ impl Reactor {
             } => {
                 if return_loan_first {
                     if state.items.iter().any(|item| item.key == key) {
-                        state.remove_after_return.insert(key.clone());
+                        // Only the folder confirmed now is deleted after the return.
+                        if let Some(folder) = state.folder_of(&key) {
+                            state.remove_after_return.insert(key.clone(), folder);
+                        }
                         self.start_return(state, key);
                     }
                 } else {
@@ -582,7 +613,7 @@ impl Reactor {
                 state.returning.remove(&key);
                 let remove = state.remove_after_return.remove(&key);
                 match result {
-                    Ok(_) if remove => state.remove_folder(&key),
+                    Ok(_) if let Some(folder) = remove => state.remove_path(&key, &folder),
                     Ok(_) => {
                         state.row_errors.remove(&key);
                     }
@@ -631,7 +662,7 @@ impl Reactor {
                 username,
                 password,
             } => {
-                if state.signing_in {
+                if state.signing_in || state.signing_out || state.user.is_some() {
                     return;
                 }
                 state.sign_in_error = None;
@@ -667,24 +698,31 @@ impl Reactor {
                 }
             }
             Msg::SignOut => {
+                if state.signing_in || state.signing_out {
+                    return;
+                }
+                state.signing_out = true;
                 let ops = self.ops.clone();
                 self.spawn(move || ops.sign_out(), Msg::SignedOut);
             }
-            Msg::SignedOut(result) => match result {
-                Ok(()) => {
-                    state.user = None;
-                    state.new_generation();
-                    state.remove_cache();
-                    state.cloud.clear();
-                    // Queued cloud rows have no ACSM once the list is gone, and old
-                    // failures would mark the remaining Local rows Failed.
-                    state.queue.clear();
-                    state.failures.clear();
-                    state.row_errors.clear();
-                    state.remerge();
+            Msg::SignedOut(result) => {
+                state.signing_out = false;
+                match result {
+                    Ok(()) => {
+                        state.user = None;
+                        state.new_generation();
+                        state.remove_cache();
+                        state.cloud.clear();
+                        // Queued cloud rows have no ACSM once the list is gone, and old
+                        // failures would mark the remaining Local rows Failed.
+                        state.queue.clear();
+                        state.failures.clear();
+                        state.row_errors.clear();
+                        state.remerge();
+                    }
+                    Err(e) => state.add_banner(format!("Sign-out failed: {e}")),
                 }
-                Err(e) => state.add_banner(format!("Sign-out failed: {e}")),
-            },
+            }
             Msg::Imported(result) => {
                 state.running = None;
                 match result {
@@ -1011,6 +1049,29 @@ mod tests {
             )]
         );
         assert!(nested.exists());
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A theme-only change keeps a books folder whose path is not valid UTF-8.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_books_dir_survives_theme_change() {
+        use std::os::unix::ffi::OsStrExt;
+        let (dir, reactor) = reactor();
+        let mut state = lock(&reactor.state);
+        let books = dir.join(std::ffi::OsStr::from_bytes(b"B\xffooks"));
+        std::fs::create_dir_all(&books).unwrap();
+        state.settings.books_dir = Some(books.clone());
+        state.library = Library::open(&books).unwrap();
+        let shown = settings(&state.settings);
+        let _ = state.apply_settings(Settings {
+            theme: Theme::Dark,
+            ..shown
+        });
+        assert_eq!(state.settings.books_dir, Some(books.clone()));
+        assert_eq!(state.library.root, books);
+        assert_eq!(state.settings.theme, library::Theme::Dark);
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }

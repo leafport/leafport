@@ -80,6 +80,7 @@ pub struct Status {
     pub loading_providers: bool,
     pub refreshing: bool,
     pub importing: bool,
+    /// Whether a sync, import or loan return runs. The books folder cannot change then.
     pub job_running: bool,
     pub can_sync_all: bool,
     pub can_cancel_all: bool,
