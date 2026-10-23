@@ -85,8 +85,8 @@ fn load_activation() -> Result<ActivationState, String> {
         .ok_or_else(|| "not signed in".to_string())
 }
 
-/// Persist registration before fulfillment, and keep successful operator setup even
-/// if the subsequent book download fails. Retrying must reuse the registered device.
+/// Require the device activation made at sign-in, and keep successful operator setup
+/// even if the subsequent book download fails, so the next sync reuses it.
 fn with_fulfillment_activation<T>(
     work: impl FnOnce(&mut ActivationState, &ServiceClient) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -106,11 +106,12 @@ fn with_fulfillment_activation<T>(
                 && current.credentials_xml == credentials
         })
     };
-    if leafport_core::activation::ensure_device_activation(&client, &mut state)
+    // Only sign-in activates a device; a sync without an activation fails.
+    if leafport_core::activation::require_device_activation(&mut state)
         .map_err(|e| e.to_string())?
     {
         if !account_is_current() {
-            return Err("account changed during device activation".into());
+            return Err("account changed while checking the device activation".into());
         }
         state
             .save(&store, DEFAULT_ACCOUNT)

@@ -195,7 +195,7 @@ mod device_activation {
     use super::common::{self, FakeTransport};
     use leafport_core::activation::{
         ACTIVATION_SERVICE_INFO, ActivationTokenError, DeviceActivationError, activate_request,
-        ensure_device_activation, parse_activation_token,
+        ensure_device_activation, parse_activation_token, require_device_activation,
     };
 
     const SERVICE_INFO: &str = r#"<activationServiceInfo xmlns="http://ns.adobe.com/adept"><authURL>http://a.example/adept</authURL><userInfoURL>http://a.example/adept</userInfoURL><activationURL>https://act.example/adept</activationURL><certificate>AA==</certificate></activationServiceInfo>"#;
@@ -337,6 +337,35 @@ mod device_activation {
             transport.requests.lock().unwrap()[1].0,
             "http://a.example/adept/Activate"
         );
+    }
+
+    #[test]
+    fn require_device_activation_never_activates() {
+        let mut state = unactivated();
+        let error = require_device_activation(&mut state).unwrap_err();
+        assert!(matches!(error, DeviceActivationError::NotActivated));
+        assert_eq!(
+            error.to_string(),
+            "this device is not activated; sign in again"
+        );
+    }
+
+    #[test]
+    fn require_device_activation_accepts_a_matching_stored_token() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some(token(&state.user, &state.fingerprint));
+        // A stale local device identifier is corrected to the token's.
+        assert!(require_device_activation(&mut state).unwrap());
+        assert_eq!(state.device, "urn:uuid:server-device");
+        assert!(!require_device_activation(&mut state).unwrap());
+    }
+
+    #[test]
+    fn require_device_activation_rejects_another_users_token() {
+        let mut state = unactivated();
+        state.activation_token_xml = Some(token("urn:uuid:someone-else", &state.fingerprint));
+        let error = require_device_activation(&mut state).unwrap_err();
+        assert!(matches!(error, DeviceActivationError::Mismatch("user")));
     }
 
     #[test]

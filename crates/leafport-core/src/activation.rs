@@ -674,6 +674,8 @@ pub enum DeviceActivationError {
     /// The stored activation token no longer parses. It is not replaced silently,
     /// since a new activation uses another of the account's device slots.
     StoredToken(ActivationTokenError),
+    /// No activation is stored. Only sign-in activates a device.
+    NotActivated,
 }
 
 impl fmt::Display for DeviceActivationError {
@@ -688,6 +690,7 @@ impl fmt::Display for DeviceActivationError {
                 write!(f, "device activation token is for another {field}")
             }
             Self::StoredToken(error) => write!(f, "stored device activation is unusable: {error}"),
+            Self::NotActivated => write!(f, "this device is not activated; sign in again"),
         }
     }
 }
@@ -733,6 +736,32 @@ pub fn perform_activate(
     Ok(token)
 }
 
+/// Check the stored activation without any network request; it is never created here.
+///
+/// The token must parse and match the state's user and fingerprint. A stale
+/// `state.device` is corrected to the token's device (`Ok(true)`, persist `state`);
+/// otherwise nothing changes (`Ok(false)`). Without a token: `NotActivated`.
+pub fn require_device_activation(
+    state: &mut crate::store::ActivationState,
+) -> Result<bool, DeviceActivationError> {
+    let xml = state
+        .activation_token_xml
+        .as_ref()
+        .ok_or(DeviceActivationError::NotActivated)?;
+    let token = parse_activation_token(xml).map_err(DeviceActivationError::StoredToken)?;
+    if token.user != state.user {
+        return Err(DeviceActivationError::Mismatch("user"));
+    }
+    if token.fingerprint != state.fingerprint {
+        return Err(DeviceActivationError::Mismatch("fingerprint"));
+    }
+    if token.device == state.device {
+        return Ok(false);
+    }
+    state.device = token.device;
+    Ok(true)
+}
+
 /// Make sure the device holds a server-issued activation for the signed-in user.
 ///
 /// With a stored token no request is sent. The token must parse and match the state's
@@ -748,19 +777,9 @@ pub fn ensure_device_activation(
     transport: &dyn crate::service::Transport,
     state: &mut crate::store::ActivationState,
 ) -> Result<bool, DeviceActivationError> {
-    if let Some(xml) = &state.activation_token_xml {
-        let token = parse_activation_token(xml).map_err(DeviceActivationError::StoredToken)?;
-        if token.user != state.user {
-            return Err(DeviceActivationError::Mismatch("user"));
-        }
-        if token.fingerprint != state.fingerprint {
-            return Err(DeviceActivationError::Mismatch("fingerprint"));
-        }
-        if token.device == state.device {
-            return Ok(false);
-        }
-        state.device = token.device;
-        return Ok(true);
+    match require_device_activation(state) {
+        Err(DeviceActivationError::NotActivated) => {}
+        checked => return checked,
     }
     let info = transport
         .fetch(ACTIVATION_SERVICE_INFO, 1024 * 1024)

@@ -208,20 +208,15 @@ impl Account {
                     state.activation_token_xml = None;
                     state.operator_urls.clear();
                 }
-                // Keep the sign-in even if device activation fails below; the next sync
-                // retries activation.
+                // Register this device with the activation service (POST /Activate) after
+                // signing in. Fulfillment requires the server-issued device,
+                // and only sign-in activates: if this fails, the sign-in fails and nothing
+                // new is saved, so the user signs in again.
+                activation::ensure_device_activation(&client, &mut state)
+                    .map_err(|e| e.to_string())?;
                 state
                     .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
                     .map_err(|e| e.to_string())?;
-                // Register this device with the activation service (POST /Activate) after
-                // signing in. Fulfillment requires the server-issued device.
-                if activation::ensure_device_activation(&client, &mut state)
-                    .map_err(|e| e.to_string())?
-                {
-                    state
-                        .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
-                        .map_err(|e| e.to_string())?;
-                }
                 Ok(signed.user)
             });
             // password/username were moved in and dropped here; nothing is returned.
