@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 
 use leafport_core::library::{Item, ItemState};
 
-use crate::{Activity, MenuAction, Primary, Row, RowState};
+use crate::{Activity, MenuAction, Primary, Row, RowState, Status};
 
 /// A unit of queued work. One runs at a time, in request order.
+// The sync queue constructs these; until it lands only the row rules read them.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Job {
     /// Sync the row with this key.
@@ -125,6 +127,33 @@ pub(crate) fn row(item: &Item, busy: &Busy) -> Row {
     }
 }
 
+/// The app-wide facts the status line is built from.
+pub(crate) struct StatusInputs<'a> {
+    /// The signed-in account label.
+    pub user: Option<&'a str>,
+    pub refreshing: bool,
+    pub banner: &'a [String],
+    /// The effective books folder; `None` when none could be determined.
+    pub books_dir: Option<&'a Path>,
+}
+
+/// Build the status a UI draws outside the list.
+pub(crate) fn status(inputs: &StatusInputs) -> Status {
+    Status {
+        user: inputs.user.map(str::to_owned),
+        signing_in: false,
+        loading_providers: false,
+        refreshing: inputs.refreshing,
+        importing: false,
+        job_running: false,
+        can_sync_all: false,
+        can_cancel_all: false,
+        sign_in_error: None,
+        banner: inputs.banner.to_vec(),
+        books_dir: inputs.books_dir.map(path_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +212,22 @@ mod tests {
                 },
             )
         }
+    }
+
+    #[test]
+    fn status_copies_inputs() {
+        let banner = vec!["m".to_string()];
+        let s = status(&StatusInputs {
+            user: Some("u"),
+            refreshing: true,
+            banner: &banner,
+            books_dir: Some(Path::new("/b")),
+        });
+        assert_eq!(s.user.as_deref(), Some("u"));
+        assert!(s.refreshing);
+        assert_eq!(s.banner, banner);
+        assert_eq!(s.books_dir.as_deref(), Some("/b"));
+        assert!(!s.job_running && !s.signing_in && s.sign_in_error.is_none());
     }
 
     #[test]
