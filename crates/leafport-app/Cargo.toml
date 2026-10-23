@@ -1,0 +1,10 @@
+[package]
+name = "leafport-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+leafport-core = { path = "../leafport-core" }
+
+[dev-dependencies]
+base64 = "0.23.1"

@@ -2171,6 +2171,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "leafport-app"
+version = "0.1.0-dev"
+dependencies = [
+ "base64",
+ "leafport-core",
+]
+
+[[package]]
 name = "leafport-cli"
 version = "0.1.0-dev"
 dependencies = [
