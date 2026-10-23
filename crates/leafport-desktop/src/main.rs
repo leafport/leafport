@@ -125,10 +125,8 @@ impl App {
             tx,
             rx,
         };
+        // The cloud list is refreshed only when the user asks; until then the cache shows.
         app.remerge();
-        if app.account.signed_in.is_some() {
-            app.refresh(&cc.egui_ctx);
-        }
         if let Some(path) = startup_acsm() {
             app.enqueue_import(path, &cc.egui_ctx);
         }
@@ -292,18 +290,14 @@ impl App {
             Event::SignIn(result) => {
                 if self.account.on_sign_in(result) {
                     self.new_generation();
-                    self.refresh(ctx);
                 }
             }
             Event::Refreshed { generation, .. }
                 if generation != self.generation || self.account.signed_in.is_none() =>
             {
                 // Started before a sign-in or sign-out: it may have rewritten the cache
-                // after sign-out removed it. Drop it, and refetch for a current account.
+                // after sign-out removed it. Drop it; the user refreshes again if wanted.
                 self.remove_cache();
-                if self.account.signed_in.is_some() && !self.refreshing {
-                    self.refresh(ctx);
-                }
             }
             Event::Refreshed { result, .. } => {
                 self.refreshing = false;
@@ -340,10 +334,6 @@ impl App {
                         self.covers.forget(&outcome.folder);
                         if let Some(warning) = outcome.warning {
                             add_banner(&mut self.banner, warning);
-                        }
-                        // Fetch the cloud record the import uploaded.
-                        if self.account.signed_in.is_some() {
-                            self.refresh(ctx);
                         }
                     }
                     Err(e) => add_banner(&mut self.banner, format!("Import failed: {e}")),
