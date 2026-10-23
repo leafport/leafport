@@ -82,6 +82,49 @@ impl App {
         self.send(Msg::Import(path.into()));
     }
 
+    /// Return the loan of the row with `key`. Unknown keys are ignored.
+    pub fn return_loan(&self, key: String) {
+        self.send(Msg::ReturnLoan(key));
+    }
+
+    /// Delete the title folder of the row with `key`; the book stays in the cloud list.
+    /// With `return_loan_first` the loan is returned first and the folder is deleted only
+    /// once that succeeds. The UI asks for confirmation before calling this.
+    pub fn remove(&self, key: String, return_loan_first: bool) {
+        self.send(Msg::Remove {
+            key,
+            return_loan_first,
+        });
+    }
+
+    /// Save `settings` and, when the books folder changed, open the new one. Applying the
+    /// theme is up to the UI.
+    ///
+    /// Unlike the other methods this one returns its result, so it applies the change
+    /// itself under the state lock instead of through the reactor. It then sends a
+    /// message so the reactor publishes the changed rows and status: the reactor is still
+    /// the only thread that emits events. It never waits for the reactor, so it may be
+    /// called from `Listener::on_event`.
+    ///
+    /// Returns `AppError::Busy` and saves nothing when the books folder changes while a
+    /// sync or import runs, and `AppError::Save` when the file cannot be written (the
+    /// settings still apply for this session).
+    pub fn set_settings(&self, settings: Settings) -> Result<(), AppError> {
+        let result = state::lock(&self.state).apply_settings(settings);
+        self.send(Msg::Publish);
+        result
+    }
+
+    /// Empty the banner.
+    pub fn clear_banner(&self) {
+        self.send(Msg::ClearBanner);
+    }
+
+    /// Add a message to the banner, for failures the UI hits itself.
+    pub fn add_message(&self, message: String) {
+        self.send(Msg::AddMessage(message));
+    }
+
     fn send(&self, msg: Msg) {
         // The reactor only stops once the app is gone, so this cannot fail while `self` lives.
         let _ = self.tx.send(msg);

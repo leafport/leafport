@@ -7,12 +7,14 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use leafport_core::cloud::DownloadRecord;
 use leafport_core::fulfillment::{Acsm, MAX_ACSM_BYTES};
-use leafport_core::library::{self, Item, ItemState, Library, SyncOutcome, load_cache, merge};
+use leafport_core::library::{
+    self, Item, ItemState, Library, Metadata, SyncOutcome, load_cache, merge,
+};
 use leafport_core::service::CancelToken;
 
 use crate::ops::{Ops, Paths, SyncHooks};
 use crate::rows::{self, Busy, Job, StatusInputs};
-use crate::{Event, Listener, Row, Settings, Snapshot, Status, Theme};
+use crate::{AppError, Event, Listener, Row, Settings, Snapshot, Status, Theme};
 
 /// The most banner messages kept; older ones drop off.
 const BANNER_LINES: usize = 5;
@@ -75,6 +77,24 @@ pub(crate) enum Msg {
     },
     /// A finished import.
     Imported(Result<SyncOutcome, String>),
+    /// Return the loan of this key.
+    ReturnLoan(String),
+    /// Delete the title folder of this key, returning its loan first when asked.
+    Remove {
+        key: String,
+        return_loan_first: bool,
+    },
+    /// A finished loan return.
+    Returned {
+        key: String,
+        result: Result<Metadata, String>,
+    },
+    /// Add a message to the banner.
+    AddMessage(String),
+    /// Empty the banner.
+    ClearBanner,
+    /// Settings changed under the lock; publish what changed.
+    Publish,
 }
 
 /// Everything the reactor owns. `App` reads only the `emitted_*` fields and the settings.
@@ -99,6 +119,8 @@ pub(crate) struct State {
     pub returning: HashSet<String>,
     /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
     pub row_errors: HashMap<String, String>,
+    /// Rows whose title folder is deleted once their running return succeeds.
+    pub remove_after_return: HashSet<String>,
     /// Recent unique messages, oldest first.
     pub banner: Vec<String>,
     /// The signed-in account label.
@@ -171,6 +193,7 @@ impl State {
             committed: false,
             returning: HashSet::new(),
             row_errors: HashMap::new(),
+            remove_after_return: HashSet::new(),
             banner,
             user,
             refreshing: false,
@@ -228,6 +251,81 @@ impl State {
             .filter(|item| item.publication.is_none() && item.acsm.is_some())
             .map(|item| item.key.clone())
             .collect()
+    }
+
+    /// Delete the title folder of the row with `key` and rescan. The book stays in the
+    /// cloud list.
+    pub(crate) fn remove_folder(&mut self, key: &str) {
+        let Some(folder) = self
+            .items
+            .iter()
+            .find(|item| item.key == key)
+            .and_then(|item| item.folder.clone())
+        else {
+            return;
+        };
+        // Only a title folder directly inside the books folder is ever deleted.
+        if folder.parent() != Some(self.library.root.as_path()) {
+            self.add_banner(format!(
+                "Not removing {}: outside the books folder",
+                folder.display()
+            ));
+            return;
+        }
+        match std::fs::remove_dir_all(&folder) {
+            Ok(()) => {
+                self.failures.remove(key);
+                self.row_errors.remove(key);
+            }
+            Err(e) => self.add_banner(format!("Could not remove {}: {e}", folder.display())),
+        }
+        self.rescan();
+    }
+
+    /// Save `new`, and on a books folder change open the new folder. The theme is applied
+    /// by the UI. A folder change while a sync or import runs is refused before anything
+    /// is saved. A failed save is reported but the settings still apply in memory, as in
+    /// the egui app.
+    pub(crate) fn apply_settings(&mut self, new: Settings) -> Result<(), AppError> {
+        let mut next = self.settings.clone();
+        next.books_dir = new
+            .books_dir
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from);
+        next.theme = match new.theme {
+            Theme::System => library::Theme::System,
+            Theme::Light => library::Theme::Light,
+            Theme::Dark => library::Theme::Dark,
+        };
+        let old_root = self.settings.books_dir_or_default();
+        let new_root = next.books_dir_or_default();
+        let folder_changes = new_root != old_root;
+        if folder_changes && self.running.is_some() {
+            return Err(AppError::Busy);
+        }
+        let saved = match &self.paths.settings {
+            Some(path) => next.save(path).map_err(|e| e.to_string()).map_err(|e| {
+                self.add_banner(format!("Could not save settings: {e}"));
+                e
+            }),
+            None => {
+                let message = "No settings folder could be determined.".to_string();
+                self.add_banner(message.clone());
+                Err(message)
+            }
+        };
+        self.settings = next;
+        if folder_changes && let Some(root) = new_root {
+            self.library = Library::open(&root).unwrap_or_else(|e| {
+                self.add_banner(format!("Could not open {}: {e}", root.display()));
+                Library {
+                    root,
+                    local: vec![],
+                }
+            });
+            self.remerge();
+        }
+        saved.map_err(|message| AppError::Save { message })
     }
 
     pub(crate) fn add_banner(&mut self, message: String) {
@@ -428,6 +526,37 @@ impl Reactor {
                 state.rescan();
                 self.start_next(state);
             }
+            Msg::ReturnLoan(key) => self.start_return(state, key),
+            Msg::Remove {
+                key,
+                return_loan_first,
+            } => {
+                if return_loan_first {
+                    if state.items.iter().any(|item| item.key == key) {
+                        state.remove_after_return.insert(key.clone());
+                        self.start_return(state, key);
+                    }
+                } else {
+                    state.remove_folder(&key);
+                }
+            }
+            Msg::Returned { key, result } => {
+                state.returning.remove(&key);
+                let remove = state.remove_after_return.remove(&key);
+                match result {
+                    Ok(_) if remove => state.remove_folder(&key),
+                    Ok(_) => {
+                        state.row_errors.remove(&key);
+                    }
+                    Err(e) => {
+                        state.row_errors.insert(key, e);
+                    }
+                }
+                state.rescan();
+            }
+            Msg::AddMessage(message) => state.add_banner(message),
+            Msg::ClearBanner => state.banner.clear(),
+            Msg::Publish => {}
             Msg::Imported(result) => {
                 state.running = None;
                 match result {
@@ -537,6 +666,23 @@ impl Reactor {
                 Msg::Imported,
             ),
         }
+    }
+
+    /// Start returning the loan of the row with `key`, unless a return already runs.
+    fn start_return(&self, state: &mut State, key: String) {
+        if state.returning.contains(&key) {
+            return;
+        }
+        let Some(item) = state.items.iter().find(|item| item.key == key).cloned() else {
+            return;
+        };
+        state.row_errors.remove(&key);
+        state.returning.insert(key.clone());
+        let ops = self.ops.clone();
+        self.spawn(
+            move || ops.return_loan(&item),
+            move |result| Msg::Returned { key, result },
+        );
     }
 
     fn refresh(&self, state: &mut State) {
@@ -705,6 +851,38 @@ mod tests {
         assert!(state.running_cancellable());
         reactor.apply(&mut state, Msg::Committed { key: "a".into() }, &mut events);
         assert!(!state.running_cancellable());
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_outside_root_refused() {
+        let (dir, reactor) = reactor();
+        let mut state = lock(&reactor.state);
+        let nested = state.library.root.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        state.items.push(Item {
+            key: "k".into(),
+            title: "T".into(),
+            author: None,
+            format: leafport_core::library::Format::Epub,
+            state: ItemState::Synced,
+            acsm: None,
+            folder: Some(nested.clone()),
+            publication: None,
+            cover: None,
+            metadata: None,
+            warning: None,
+        });
+        state.remove_folder("k");
+        assert_eq!(
+            state.banner,
+            [format!(
+                "Not removing {}: outside the books folder",
+                nested.display()
+            )]
+        );
+        assert!(nested.exists());
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }
