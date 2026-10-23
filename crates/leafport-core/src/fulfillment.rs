@@ -493,6 +493,10 @@ pub enum FulfillError {
     Download(crate::service::ServiceError),
     DownloadHttp {
         status: reqwest::StatusCode,
+        /// Host of the download URL. The full URL is not kept: it may carry a token.
+        host: String,
+        /// The start of the error page as plain text, if it has any.
+        excerpt: Option<String>,
     },
     BadDownloadUrl,
     BadOperatorUrl,
@@ -508,7 +512,17 @@ impl fmt::Display for FulfillError {
             Self::Utf8(error) => write!(f, "fulfillment response is not UTF-8: {error}"),
             Self::Response(error) => error.fmt(f),
             Self::Download(error) => write!(f, "book download failed: {error}"),
-            Self::DownloadHttp { status } => write!(f, "book download failed: HTTP {status}"),
+            Self::DownloadHttp {
+                status,
+                host,
+                excerpt,
+            } => {
+                write!(f, "book download failed: HTTP {status} from {host}")?;
+                match excerpt {
+                    Some(excerpt) => write!(f, ": {excerpt}"),
+                    None => Ok(()),
+                }
+            }
             Self::BadDownloadUrl => write!(f, "E_ADEPT_BAD_DOWNLOAD_URL"),
             Self::BadOperatorUrl => write!(f, "E_ADEPT_BAD_OPERATOR_URL"),
         }
@@ -590,16 +604,20 @@ fn authorize_exchange(
     let response = client
         .post_adept(url, request)
         .map_err(|e| FulfillError::Authorization(format!("{operation}: {e}")))?;
-    let xml = std::str::from_utf8(&response.body)
-        .map_err(|_| FulfillError::Authorization(format!("{operation}: response is not UTF-8")))?;
-    check_not_error(xml).map_err(|e| FulfillError::Authorization(format!("{operation}: {e}")))?;
-    if !response.status.is_success() {
-        return Err(FulfillError::Authorization(format!(
-            "{operation}: HTTP {}",
-            response.status
-        )));
+    let failed = |reason: String| FulfillError::Authorization(format!("{operation}: {reason}"));
+    let checked = std::str::from_utf8(&response.body).map(check_not_error);
+    // An ADEPT error explains itself. Any other body of a failed request, such as an
+    // HTML error page, says less than its HTTP status.
+    if let Ok(Err(error @ FulfillResponseError::Service { .. })) = checked {
+        return Err(failed(error.to_string()));
     }
-    Ok(())
+    if !response.status.is_success() {
+        return Err(failed(format!("HTTP {}", response.status)));
+    }
+    match checked {
+        Ok(result) => result.map_err(|e| failed(e.to_string())),
+        Err(_) => Err(failed("response is not UTF-8".into())),
+    }
 }
 
 /// SignInDirect credentials hold no authenticationCertificate; the operator's
@@ -780,11 +798,53 @@ pub fn perform_fulfillment(
     if !download.status.is_success() {
         return Err(FulfillError::DownloadHttp {
             status: download.status,
+            host: download_url.host_str().unwrap_or_default().to_owned(),
+            excerpt: page_excerpt(&download.body),
         });
     }
     Ok(FulfilledBook {
         fulfillment,
         body: download.body,
+    })
+}
+
+/// The start of an error page as plain text: markup, scripts and styles removed,
+/// whitespace collapsed, at most 200 characters. `None` when no text is left.
+fn page_excerpt(body: &[u8]) -> Option<String> {
+    const MAX_CHARS: usize = 200;
+    let page = String::from_utf8_lossy(&body[..body.len().min(64 * 1024)]);
+    let mut text = String::new();
+    let mut rest = page.as_ref();
+    while let Some(start) = rest.find('<') {
+        text.push_str(&rest[..start]);
+        text.push(' ');
+        rest = &rest[start..];
+        let lower = rest.get(..7).unwrap_or(rest).to_ascii_lowercase();
+        let close = ["<script", "<style"]
+            .iter()
+            .find(|tag| lower.starts_with(*tag))
+            .map(|tag| format!("</{}", &tag[1..]));
+        let end = match close {
+            Some(close) => rest.to_ascii_lowercase().find(&close).unwrap_or(rest.len()),
+            None => 0,
+        };
+        rest = &rest[end..];
+        rest = rest.find('>').map_or("", |gt| &rest[gt + 1..]);
+    }
+    text.push_str(rest);
+    let text = text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    Some(match text.char_indices().nth(MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
     })
 }
 

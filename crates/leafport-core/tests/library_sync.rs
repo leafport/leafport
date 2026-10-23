@@ -299,6 +299,22 @@ fn failed_operator_setup_never_fulfills_or_caches_the_operator() {
 }
 
 #[test]
+fn an_html_error_page_from_operator_auth_reports_its_http_status() {
+    let root = tempdir();
+    let lib = Library::open(root.path()).unwrap();
+    let mut state = operator_activation();
+    let acsm =
+        acsm_xml("urn:uuid:new-operator", "New operator").replace("op.example", "new.example");
+    let page = "<!DOCTYPE html><html><body>Access denied</body></html>";
+    let transport = FakeTransport::new().respond("/Auth", 403, page);
+    let error = lib
+        .sync_item(acsm.as_bytes(), &mut state, &transport)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Auth: HTTP 403"), "{error}");
+}
+
+#[test]
 fn successful_operator_setup_is_retained_after_a_download_failure() {
     let root = tempdir();
     let lib = Library::open(root.path()).unwrap();

@@ -324,3 +324,30 @@ fn perform_fulfillment_runs_over_a_fake_transport() {
     assert_eq!(book.body, b"BOOK");
     assert_eq!(transport.requests.lock().unwrap().len(), 2);
 }
+
+#[test]
+fn a_failed_book_download_names_its_host_and_error_page() {
+    let acsm = Acsm::parse(acsm_with_operator("https://op.example/fulfillment")).unwrap();
+    let ok = r#"<fulfillmentResult xmlns="http://ns.adobe.com/adept"><resourceItemInfo><resource>urn:uuid:b</resource><src>https://dl.example/b.pdf?token=SECRET</src></resourceItemInfo></fulfillmentResult>"#;
+    let page = "<!DOCTYPE html><html><head><title>Sorry...</title></head><body><p>We're sorry...\n  but your computer may be sending automated queries.</p></body></html>";
+    let transport = common::FakeTransport::new()
+        .respond("/fulfillment/Fulfill", 200, ok)
+        .respond("/b.pdf?token=SECRET", 503, page);
+    let Err(error) = perform_fulfillment(
+        &transport,
+        &acsm,
+        "u",
+        "d",
+        "standalone",
+        &[],
+        common::key(),
+    ) else {
+        panic!("download succeeded");
+    };
+    let error = error.to_string();
+    assert_eq!(
+        error,
+        "book download failed: HTTP 503 Service Unavailable from dl.example: Sorry... We're sorry... but your computer may be sending automated queries."
+    );
+    assert!(!error.contains("SECRET"));
+}

@@ -11,6 +11,11 @@ pub const AUTHENTICATION_SERVICE_INFO: &str =
 #[derive(Debug)]
 pub enum ServiceError {
     ResponseTooLarge,
+    /// The server answered 429 Too Many Requests. Not retried: retrying only prolongs
+    /// a rate limit or block.
+    RateLimited {
+        host: String,
+    },
     Http(reqwest::Error),
     Read(std::io::Error),
     Utf8(std::string::FromUtf8Error),
@@ -21,6 +26,10 @@ impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ResponseTooLarge => write!(f, "service response exceeds the local size limit"),
+            Self::RateLimited { host } => write!(
+                f,
+                "{host} is limiting requests from this network (HTTP 429). Try again later."
+            ),
             Self::Http(error) => write!(f, "service request failed: {error}"),
             Self::Read(error) => write!(f, "service response read failed: {error}"),
             Self::Utf8(error) => write!(f, "service response is not UTF-8: {error}"),
@@ -31,11 +40,11 @@ impl fmt::Display for ServiceError {
 
 impl Error for ServiceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        if matches!(self, Self::ResponseTooLarge) {
+        if matches!(self, Self::ResponseTooLarge | Self::RateLimited { .. }) {
             return None;
         }
         Some(match self {
-            Self::ResponseTooLarge => unreachable!(),
+            Self::ResponseTooLarge | Self::RateLimited { .. } => unreachable!(),
             Self::Http(error) => error,
             Self::Read(error) => error,
             Self::Utf8(error) => error,
@@ -70,6 +79,22 @@ impl Transport for ServiceClient {
     }
 }
 
+/// User-Agent sent with every request. Kobo's Cloudflare front end refuses requests
+/// without one with 403.
+const USER_AGENT: &str = concat!("Leafport/", env!("CARGO_PKG_VERSION"));
+
+/// Turn a 429 into `RateLimited`, naming the host the request ended at.
+fn reject_rate_limit(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, ServiceError> {
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(ServiceError::RateLimited {
+            host: response.url().host_str().unwrap_or_default().to_owned(),
+        });
+    }
+    Ok(response)
+}
+
 impl ServiceClient {
     /// Blocking transport for already constructed ADEPT request XML.
     /// No automatic retry: fulfillment may consume a single-use token.
@@ -84,6 +109,7 @@ impl ServiceClient {
             .body(xml)
             .send()
             .map_err(ServiceError::Http)?;
+        let response = reject_rate_limit(response)?;
         let status = response.status();
         let mut body = Vec::new();
         response
@@ -101,6 +127,7 @@ impl ServiceClient {
     /// visible to the caller rather than silently treated as book content.
     pub fn fetch(&self, url: &str, max_bytes: usize) -> Result<AdeptResponse, ServiceError> {
         let response = self.http.get(url).send().map_err(ServiceError::Http)?;
+        let response = reject_rate_limit(response)?;
         let status = response.status();
         let mut body = Vec::new();
         response
@@ -115,6 +142,7 @@ impl ServiceClient {
 
     pub fn new() -> Result<Self, ServiceError> {
         let http = reqwest::blocking::Client::builder()
+            .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(15))
             // Fulfilled downloads can be large; allow a longer overall deadline.
             .timeout(Duration::from_secs(300))
@@ -161,5 +189,81 @@ impl ServiceClient {
         catalog
             .apply_service_info(&xml)
             .map_err(ServiceError::Vendor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One request against a local server: the raw request head it received.
+    fn request_head(send: impl FnOnce(&ServiceClient, &str)) -> String {
+        respond_with(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            send,
+        )
+    }
+
+    /// One request against a local server answering `response`: the request head.
+    fn respond_with(response: &'static str, send: impl FnOnce(&ServiceClient, &str)) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/x", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(head).unwrap()
+        });
+        send(&ServiceClient::new().unwrap(), &url);
+        server.join().unwrap()
+    }
+
+    #[test]
+    fn a_429_fails_at_once_as_rate_limited() {
+        const LIMITED: &str =
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        respond_with(LIMITED, |client, url| {
+            let Err(error) = client.fetch(url, 1024) else {
+                panic!("429 accepted");
+            };
+            assert!(matches!(error, ServiceError::RateLimited { ref host } if host == "127.0.0.1"));
+            assert_eq!(
+                error.to_string(),
+                "127.0.0.1 is limiting requests from this network (HTTP 429). Try again later."
+            );
+        });
+        respond_with(LIMITED, |client, url| {
+            let Err(error) = client.post_adept(url, String::new()) else {
+                panic!("429 accepted");
+            };
+            assert!(matches!(error, ServiceError::RateLimited { .. }));
+        });
+    }
+
+    #[test]
+    fn requests_carry_the_user_agent() {
+        // Kobo's Cloudflare front end answers requests without a User-Agent with 403.
+        for head in [
+            request_head(|client, url| {
+                client.fetch(url, 1024).unwrap();
+            }),
+            request_head(|client, url| {
+                client.post_adept(url, String::new()).unwrap();
+            }),
+        ] {
+            assert!(
+                head.to_ascii_lowercase().contains(&format!(
+                    "\r\nuser-agent: leafport/{}\r\n",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                "{head}"
+            );
+        }
     }
 }
