@@ -1,6 +1,7 @@
 //! UI-free application logic shared by the native Leafport frontends.
 
 mod diff;
+mod live;
 mod ops;
 mod rows;
 mod state;
@@ -15,6 +16,7 @@ pub use types::{
     Snapshot, Status, Theme,
 };
 
+use live::LiveOps;
 use state::{Msg, Reactor, State};
 
 /// The app. Every method returns immediately; changes reach the `Listener` as events.
@@ -25,6 +27,12 @@ pub struct App {
 }
 
 impl App {
+    /// Start the app against the real network and credential store, with the platform's
+    /// settings and cache locations.
+    pub fn new(listener: Box<dyn Listener>) -> Arc<App> {
+        App::with_ops(Arc::new(LiveOps), Paths::platform(), listener)
+    }
+
     /// Load the settings, books folder, cloud list cache and account through `ops`, and
     /// start the reactor thread that reports changes to `listener`.
     pub fn with_ops(ops: Arc<dyn Ops>, paths: Paths, listener: Box<dyn Listener>) -> Arc<App> {
