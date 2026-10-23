@@ -8,8 +8,6 @@ use leafport_core::library::{Item, ItemState};
 use crate::{Activity, MenuAction, Primary, Row, RowState, Status};
 
 /// A unit of queued work. One runs at a time, in request order.
-// The sync queue constructs these; until it lands only the row rules read them.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Job {
     /// Sync the row with this key.

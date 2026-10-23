@@ -6,9 +6,11 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use leafport_core::cloud::DownloadRecord;
-use leafport_core::library::{self, Item, ItemState, Library, load_cache, merge};
+use leafport_core::fulfillment::{Acsm, MAX_ACSM_BYTES};
+use leafport_core::library::{self, Item, ItemState, Library, SyncOutcome, load_cache, merge};
+use leafport_core::service::CancelToken;
 
-use crate::ops::{Ops, Paths};
+use crate::ops::{Ops, Paths, SyncHooks};
 use crate::rows::{self, Busy, Job, StatusInputs};
 use crate::{Event, Listener, Row, Settings, Snapshot, Status, Theme};
 
@@ -52,6 +54,27 @@ pub(crate) enum Msg {
         generation: u64,
         result: Result<Vec<DownloadRecord>, String>,
     },
+    /// Queue a sync of the row with this key.
+    Sync(String),
+    /// Queue a sync of every row `unsynced` lists.
+    SyncAll,
+    /// Drop the sync of this key from the queue, or cancel it while it runs.
+    Cancel(String),
+    /// Drop every queued sync and cancel the running one. Imports stay.
+    CancelAll,
+    /// Queue an import of the ACSM file at this path.
+    Import(PathBuf),
+    /// Download progress of the sync of `key`.
+    Progress { key: String, fraction: f32 },
+    /// The sync of `key` is about to send Fulfill and can no longer be cancelled.
+    Committed { key: String },
+    /// A finished sync.
+    Synced {
+        key: String,
+        result: Result<SyncOutcome, String>,
+    },
+    /// A finished import.
+    Imported(Result<SyncOutcome, String>),
 }
 
 /// Everything the reactor owns. `App` reads only the `emitted_*` fields and the settings.
@@ -68,6 +91,10 @@ pub(crate) struct State {
     pub running: Option<Job>,
     /// Syncs and imports waiting to run, in the order requested.
     pub queue: VecDeque<Job>,
+    /// The cancel token of the running sync.
+    pub cancel: Option<CancelToken>,
+    /// Whether the running sync reported that its Fulfill is about to be sent.
+    pub committed: bool,
     /// Rows whose loan return runs.
     pub returning: HashSet<String>,
     /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
@@ -140,6 +167,8 @@ impl State {
             failures: HashMap::new(),
             running: None,
             queue: VecDeque::new(),
+            cancel: None,
+            committed: false,
             returning: HashSet::new(),
             row_errors: HashMap::new(),
             banner,
@@ -171,6 +200,36 @@ impl State {
         }
     }
 
+    /// Re-read the books folder without sweeping temp folders, so a running sync is safe.
+    pub(crate) fn rescan(&mut self) {
+        match Library::rescan(&self.library.root) {
+            Ok(library) => self.library = library,
+            Err(e) => self.add_banner(format!("Could not read the books folder: {e}")),
+        }
+        self.remerge();
+    }
+
+    /// Whether the running sync can still be cancelled: its Fulfill was not sent.
+    pub(crate) fn running_cancellable(&self) -> bool {
+        matches!(self.running, Some(Job::Sync(_)))
+            && !self.committed
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|token| !token.is_committed())
+    }
+
+    /// Keys of the rows Sync all queues: Available or Failed, with an ACSM and no book
+    /// file on disk yet.
+    pub(crate) fn unsynced(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|item| matches!(item.state, ItemState::Available | ItemState::Failed(_)))
+            .filter(|item| item.publication.is_none() && item.acsm.is_some())
+            .map(|item| item.key.clone())
+            .collect()
+    }
+
     pub(crate) fn add_banner(&mut self, message: String) {
         add_banner(&mut self.banner, message);
     }
@@ -188,7 +247,7 @@ impl State {
     fn rows(&self) -> Vec<Row> {
         let busy = Busy {
             running: self.running.as_ref(),
-            cancellable: false,
+            cancellable: self.running_cancellable(),
             queue: &self.queue,
             returning: &self.returning,
             row_errors: &self.row_errors,
@@ -201,12 +260,18 @@ impl State {
 
     fn status(&self) -> Status {
         let root = &self.library.root;
-        rows::status(&StatusInputs {
+        let mut status = rows::status(&StatusInputs {
             user: self.user.as_deref(),
             refreshing: self.refreshing,
             banner: &self.banner,
             books_dir: (!root.as_os_str().is_empty()).then_some(root.as_path()),
-        })
+        });
+        status.importing = matches!(self.running, Some(Job::Import(_)));
+        status.job_running = self.running.is_some();
+        status.can_sync_all = self.user.is_some() && !self.unsynced().is_empty();
+        status.can_cancel_all =
+            self.running_cancellable() || self.queue.iter().any(|job| matches!(job, Job::Sync(_)));
+        status
     }
 
     /// Recompute rows and status, append what changed since the last emit to `events`,
@@ -249,6 +314,16 @@ fn settings(settings: &library::Settings) -> Settings {
     }
 }
 
+/// Ask the running sync to stop; no effect once its Fulfill was sent.
+fn request_cancel(state: &State) {
+    if !state.running_cancellable() {
+        return;
+    }
+    if let Some(token) = &state.cancel {
+        token.cancel();
+    }
+}
+
 /// The reactor: applies every `Msg` to the state and tells the listener what changed.
 pub(crate) struct Reactor {
     pub state: Arc<Mutex<State>>,
@@ -278,7 +353,7 @@ impl Reactor {
 
     /// Apply `msg` to `state`. Handlers may push events that are not row or status
     /// changes, such as progress, to `events`.
-    fn apply(&self, state: &mut State, msg: Msg, _events: &mut Vec<Event>) {
+    fn apply(&self, state: &mut State, msg: Msg, events: &mut Vec<Event>) {
         match msg {
             Msg::Refresh => self.refresh(state),
             Msg::Refreshed { generation, .. }
@@ -298,6 +373,169 @@ impl Reactor {
                     Err(e) => state.add_banner(format!("Refresh failed: {e}")),
                 }
             }
+            Msg::Sync(key) => self.enqueue_sync(state, key),
+            Msg::SyncAll => {
+                for key in state.unsynced() {
+                    self.enqueue_sync(state, key);
+                }
+            }
+            Msg::Cancel(key) => {
+                state
+                    .queue
+                    .retain(|job| !matches!(job, Job::Sync(k) if *k == key));
+                if matches!(&state.running, Some(Job::Sync(k)) if *k == key) {
+                    request_cancel(state);
+                }
+            }
+            Msg::CancelAll => {
+                state.queue.retain(|job| !matches!(job, Job::Sync(_)));
+                if matches!(state.running, Some(Job::Sync(_))) {
+                    request_cancel(state);
+                }
+            }
+            Msg::Import(_) if state.user.is_none() => {
+                state.add_banner("Sign in before importing an ACSM.".into());
+            }
+            Msg::Import(path) => self.enqueue(state, Job::Import(path)),
+            Msg::Progress { key, fraction } => {
+                // Only the running sync reports; anything else is stale.
+                if matches!(&state.running, Some(Job::Sync(k)) if *k == key) {
+                    events.push(Event::Progress { key, fraction });
+                }
+            }
+            Msg::Committed { key } => {
+                if matches!(&state.running, Some(Job::Sync(k)) if *k == key) {
+                    state.committed = true;
+                }
+            }
+            Msg::Synced { key, result } => {
+                state.running = None;
+                state.committed = false;
+                let cancelled = state.cancel.take().is_some_and(|t| t.is_cancelled());
+                match result {
+                    Ok(outcome) => {
+                        state.failures.remove(&key);
+                        if let Some(warning) = outcome.warning {
+                            state.add_banner(warning);
+                        }
+                    }
+                    // A cancelled sync leaves the row as it was, not Failed.
+                    Err(_) if cancelled => {}
+                    Err(e) => {
+                        state.failures.insert(key, e);
+                    }
+                }
+                state.rescan();
+                self.start_next(state);
+            }
+            Msg::Imported(result) => {
+                state.running = None;
+                match result {
+                    Ok(outcome) => {
+                        state.failures.remove(&outcome.metadata.resource);
+                        if let Some(warning) = outcome.warning {
+                            state.add_banner(warning);
+                        }
+                    }
+                    Err(e) => state.add_banner(format!("Import failed: {e}")),
+                }
+                state.rescan();
+                self.start_next(state);
+            }
+        }
+    }
+
+    /// Queue a sync of the row with `key`. Keys without a row are ignored.
+    fn enqueue_sync(&self, state: &mut State, key: String) {
+        if state.items.iter().any(|item| item.key == key) {
+            self.enqueue(state, Job::Sync(key));
+        }
+    }
+
+    /// Queue `job`, unless it is already queued or running, and start it when idle.
+    fn enqueue(&self, state: &mut State, job: Job) {
+        if state.running.as_ref() == Some(&job) || state.queue.contains(&job) {
+            return;
+        }
+        state.queue.push_back(job);
+        self.start_next(state);
+    }
+
+    /// Start the front queued job when no sync or import worker runs.
+    fn start_next(&self, state: &mut State) {
+        if state.running.is_some() {
+            return;
+        }
+        let Some(job) = state.queue.pop_front() else {
+            return;
+        };
+        let library = state.library.clone();
+        let ops = self.ops.clone();
+        state.running = Some(job.clone());
+        state.cancel = None;
+        state.committed = false;
+        match job {
+            Job::Sync(key) => {
+                let acsm = state
+                    .items
+                    .iter()
+                    .find(|item| item.key == key)
+                    .and_then(|item| item.acsm.clone());
+                let cancel = CancelToken::new();
+                state.cancel = Some(cancel.clone());
+                let tx = self.tx.clone();
+                let hook_key = key.clone();
+                self.spawn(
+                    move || {
+                        let acsm = acsm.ok_or_else(|| "no ACSM for this item".to_string())?;
+                        if library.root.as_os_str().is_empty() {
+                            return Err("no books folder configured".into());
+                        }
+                        Acsm::parse(String::from_utf8_lossy(&acsm).into_owned())
+                            .map_err(|e| e.to_string())?;
+                        let send = |msg: Msg| {
+                            if let Some(tx) = tx.upgrade() {
+                                let _ = tx.send(msg);
+                            }
+                        };
+                        let progress = |fraction: f32| {
+                            send(Msg::Progress {
+                                key: hook_key.clone(),
+                                fraction,
+                            })
+                        };
+                        let committed = || {
+                            send(Msg::Committed {
+                                key: hook_key.clone(),
+                            })
+                        };
+                        let hooks = SyncHooks {
+                            progress: &progress,
+                            committed: &committed,
+                        };
+                        ops.sync(&library, &acsm, cancel, hooks)
+                    },
+                    move |result| Msg::Synced { key, result },
+                );
+            }
+            Job::Import(path) => self.spawn(
+                move || {
+                    if library.root.as_os_str().is_empty() {
+                        return Err("no books folder configured".into());
+                    }
+                    // Reject unreadable or malformed imports before registering a device.
+                    use std::io::Read;
+                    let mut acsm = String::new();
+                    std::fs::File::open(&path)
+                        .map_err(|e| e.to_string())?
+                        .take(MAX_ACSM_BYTES as u64 + 1)
+                        .read_to_string(&mut acsm)
+                        .map_err(|e| e.to_string())?;
+                    Acsm::parse(acsm).map_err(|e| e.to_string())?;
+                    ops.import(&library, &path)
+                },
+                Msg::Imported,
+            ),
         }
     }
 
@@ -331,5 +569,143 @@ impl Reactor {
         std::thread::spawn(move || {
             let _ = tx.send(msg(catch_panic(body)));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leafport_core::library::{Item, Metadata};
+    use leafport_core::vendors::VendorCatalog;
+    use std::path::Path;
+
+    /// No side effects; the tests below never reach them.
+    struct NoOps;
+
+    impl Ops for NoOps {
+        fn signed_in_user(&self) -> Result<Option<String>, String> {
+            Ok(Some("user@x".into()))
+        }
+        fn load_providers(&self) -> Result<VendorCatalog, String> {
+            unreachable!()
+        }
+        fn sign_in(
+            &self,
+            _: &VendorCatalog,
+            _: &str,
+            _: String,
+            _: String,
+        ) -> Result<String, String> {
+            unreachable!()
+        }
+        fn sign_out(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        fn refresh(&self, _: &Path) -> Result<Vec<DownloadRecord>, String> {
+            unreachable!()
+        }
+        fn sync(
+            &self,
+            _: &Library,
+            _: &[u8],
+            _: CancelToken,
+            _: SyncHooks,
+        ) -> Result<SyncOutcome, String> {
+            unreachable!()
+        }
+        fn import(&self, _: &Library, _: &Path) -> Result<SyncOutcome, String> {
+            unreachable!()
+        }
+        fn return_loan(&self, _: &Item) -> Result<Metadata, String> {
+            unreachable!()
+        }
+    }
+
+    struct Silent;
+
+    impl Listener for Silent {
+        fn on_event(&self, _: Event) {}
+    }
+
+    /// A reactor and its state, with the books folder in a fresh temp folder.
+    fn reactor() -> (PathBuf, Reactor) {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "leafport-app-state-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.yaml");
+        library::Settings {
+            books_dir: Some(dir.join("Books")),
+            ..library::Settings::default()
+        }
+        .save(&settings)
+        .unwrap();
+        let paths = Paths {
+            settings: Some(settings),
+            cache: None,
+        };
+        let state = State::load(&NoOps, paths);
+        let reactor = Reactor {
+            state: Arc::new(Mutex::new(state)),
+            ops: Arc::new(NoOps),
+            tx: Weak::new(),
+            listener: Box::new(Silent),
+        };
+        (dir, reactor)
+    }
+
+    fn progress(key: &str) -> Msg {
+        Msg::Progress {
+            key: key.into(),
+            fraction: 0.5,
+        }
+    }
+
+    #[test]
+    fn progress_only_for_running_sync() {
+        let (dir, reactor) = reactor();
+        let mut state = lock(&reactor.state);
+        let mut events = Vec::new();
+
+        reactor.apply(&mut state, progress("a"), &mut events);
+        assert!(events.is_empty(), "nothing runs");
+
+        state.running = Some(Job::Sync("a".into()));
+        reactor.apply(&mut state, progress("b"), &mut events);
+        assert!(events.is_empty(), "another key");
+        reactor.apply(&mut state, progress("a"), &mut events);
+        assert_eq!(
+            events,
+            [Event::Progress {
+                key: "a".into(),
+                fraction: 0.5
+            }]
+        );
+
+        // A late report after the sync finished is dropped.
+        events.clear();
+        state.running = None;
+        reactor.apply(&mut state, progress("a"), &mut events);
+        assert!(events.is_empty(), "finished");
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn committed_only_for_running_sync() {
+        let (dir, reactor) = reactor();
+        let mut state = lock(&reactor.state);
+        let mut events = Vec::new();
+        state.running = Some(Job::Sync("a".into()));
+        state.cancel = Some(CancelToken::new());
+        reactor.apply(&mut state, Msg::Committed { key: "b".into() }, &mut events);
+        assert!(state.running_cancellable());
+        reactor.apply(&mut state, Msg::Committed { key: "a".into() }, &mut events);
+        assert!(!state.running_cancellable());
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

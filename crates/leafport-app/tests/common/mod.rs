@@ -14,7 +14,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use leafport_app::{Event, Listener, Ops, Paths, Status, SyncHooks};
 use leafport_core::cloud::DownloadRecord;
-use leafport_core::library::{Item, Library, Metadata, Settings, SyncOutcome, acsm_summary};
+use leafport_core::library::{
+    Item, Library, Metadata, Settings, Source, SyncOutcome, acsm_summary,
+};
 use leafport_core::service::CancelToken;
 use leafport_core::vendors::VendorCatalog;
 
@@ -90,6 +92,31 @@ pub fn settings_in(dir: &Path) -> Paths {
     Paths {
         settings: Some(settings),
         cache: Some(dir.join("cache.xml")),
+    }
+}
+
+/// Write a synced book folder `books/title` for `resource`, as a finished sync leaves it,
+/// and return the outcome that sync reports.
+pub fn write_book(books: &Path, resource: &str, title: &str) -> SyncOutcome {
+    let folder = books.join(title);
+    std::fs::create_dir_all(&folder).unwrap();
+    let metadata = Metadata {
+        resource: resource.into(),
+        title: title.into(),
+        author: None,
+        format: "application/epub+zip".into(),
+        fulfillment: None,
+        source: Source::Cloud,
+        synced_at: "2026-10-23T10:00:00Z".into(),
+        returned: false,
+        loan: None,
+    };
+    metadata.write(&folder).unwrap();
+    std::fs::write(folder.join(format!("{title}.epub")), b"x").unwrap();
+    SyncOutcome {
+        folder,
+        metadata,
+        warning: None,
     }
 }
 
@@ -187,6 +214,8 @@ pub struct FakeOps {
     sync: Mutex<Receiver<SyncStep>>,
     import: Mutex<Receiver<Result<SyncOutcome, String>>>,
     return_loan: Mutex<Receiver<Result<Metadata, String>>>,
+    /// The cancel token of the most recent sync.
+    token: Mutex<Option<CancelToken>>,
 }
 
 /// The test side of a `FakeOps`: the calls it saw and the replies to send.
@@ -241,6 +270,7 @@ impl FakeOps {
             sync: Mutex::new(sync_rx),
             import: Mutex::new(import_rx),
             return_loan: Mutex::new(return_loan_rx),
+            token: Mutex::new(None),
         };
         let script = Script {
             calls,
@@ -253,6 +283,11 @@ impl FakeOps {
             return_loan,
         };
         (Arc::new(ops), script)
+    }
+
+    /// The cancel token the most recent sync was given. Panics when none ran.
+    pub fn last_token(&self) -> CancelToken {
+        self.token.lock().unwrap().clone().expect("no sync ran")
     }
 
     fn call(&self, call: Call) {
@@ -309,10 +344,11 @@ impl Ops for FakeOps {
         &self,
         _library: &Library,
         acsm: &[u8],
-        _cancel: CancelToken,
+        cancel: CancelToken,
         hooks: SyncHooks,
     ) -> Result<SyncOutcome, String> {
         let key = acsm_summary(acsm).map_err(|e| e.to_string())?.key;
+        *self.token.lock().unwrap() = Some(cancel);
         self.call(Call::Sync(key));
         let steps = self.sync.lock().unwrap();
         loop {

@@ -54,6 +54,34 @@ impl App {
         self.send(Msg::Refresh);
     }
 
+    /// Queue a sync of the row with `key`. Ignored when it is already queued or syncing,
+    /// or no row has that key.
+    pub fn sync(&self, key: String) {
+        self.send(Msg::Sync(key));
+    }
+
+    /// Queue every Available or Failed row that has an ACSM and no book file yet.
+    pub fn sync_all(&self) {
+        self.send(Msg::SyncAll);
+    }
+
+    /// Drop the sync of `key` from the queue, or cancel it while it runs, unless its
+    /// Fulfill was sent.
+    pub fn cancel(&self, key: String) {
+        self.send(Msg::Cancel(key));
+    }
+
+    /// Drop every queued sync and cancel the running one, unless its Fulfill was sent.
+    /// Imports are left alone.
+    pub fn cancel_all(&self) {
+        self.send(Msg::CancelAll);
+    }
+
+    /// Queue an import of the ACSM file at `path`. Signed out, the banner asks to sign in.
+    pub fn import_acsm(&self, path: String) {
+        self.send(Msg::Import(path.into()));
+    }
+
     fn send(&self, msg: Msg) {
         // The reactor only stops once the app is gone, so this cannot fail while `self` lives.
         let _ = self.tx.send(msg);
