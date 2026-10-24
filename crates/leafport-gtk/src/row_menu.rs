@@ -34,7 +34,7 @@ pub fn menu_model(row: &Row) -> gio::Menu {
 /// the row key (`s`). An action whose row is gone does nothing.
 pub fn action_group(window: &Rc<Window>) -> gio::SimpleActionGroup {
     let group = gio::SimpleActionGroup::new();
-    let add = |name: &str, run: fn(&Window, &str)| {
+    let add = |name: &str, run: fn(&Rc<Window>, &str)| {
         let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
         let window: Weak<Window> = Rc::downgrade(window);
         action.connect_activate(move |_, parameter| {

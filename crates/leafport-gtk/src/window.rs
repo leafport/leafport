@@ -305,7 +305,7 @@ impl Window {
 
     /// Ask before removing the title folder of `key`. Does nothing when the row is gone
     /// or has no folder.
-    pub fn confirm_remove(&self, key: &str) {
+    pub fn confirm_remove(self: &Rc<Self>, key: &str) {
         let Some(row) = self.row(key) else {
             return;
         };
@@ -331,11 +331,16 @@ impl Window {
         dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
-        let core = self.core.clone();
+        // The row may change while the dialog is open: read it again on confirm.
+        let window = Rc::downgrade(self);
         let key = row.key.clone();
-        let on_loan = row.on_loan;
         dialog.connect_response(Some("remove"), move |_, _| {
-            core.remove(key.clone(), on_loan);
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            if let Some((key, on_loan)) = remove_args(window.row(&key).as_ref()) {
+                window.core.remove(key, on_loan);
+            }
         });
         dialog.present(Some(&self.window));
     }
@@ -375,6 +380,14 @@ impl Window {
         };
         self.body.set_visible_child_name(page);
     }
+}
+
+/// The arguments of `App::remove` for `row`: its key and live `on_loan`. `None` when the
+/// row is gone or has no folder.
+fn remove_args(row: Option<&Row>) -> Option<(String, bool)> {
+    let row = row?;
+    row.folder.as_ref()?;
+    Some((row.key.clone(), row.on_loan))
 }
 
 fn vbox(spacing: i32) -> gtk::Box {
@@ -462,4 +475,52 @@ fn choose_acsm(window: &adw::ApplicationWindow, core: Arc<App>) {
             core.import_acsm(path.to_string_lossy().into_owned());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leafport_app::{Activity, RowState};
+
+    fn row(folder: Option<&str>, on_loan: bool) -> Row {
+        Row {
+            key: "k1".into(),
+            title: "t".into(),
+            author: None,
+            format: "EPUB".into(),
+            state: RowState::Synced,
+            expires: None,
+            cover_path: None,
+            folder: folder.map(Into::into),
+            publication: None,
+            error: None,
+            warning: None,
+            on_loan,
+            activity: Activity::Idle,
+            primary: None,
+            menu: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn remove_args_skips_gone_row() {
+        assert_eq!(remove_args(None), None);
+    }
+
+    #[test]
+    fn remove_args_skips_row_without_folder() {
+        assert_eq!(remove_args(Some(&row(None, false))), None);
+    }
+
+    #[test]
+    fn remove_args_uses_live_on_loan() {
+        assert_eq!(
+            remove_args(Some(&row(Some("/b/t"), false))),
+            Some(("k1".to_owned(), false))
+        );
+        assert_eq!(
+            remove_args(Some(&row(Some("/b/t"), true))),
+            Some(("k1".to_owned(), true))
+        );
+    }
 }
