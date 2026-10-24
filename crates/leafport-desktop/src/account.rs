@@ -91,9 +91,9 @@ impl Account {
         }
     }
 
-    /// Submit the form. Credentials are moved out of the UI so they are not retained
-    /// after submission; an incomplete form, or one sent before discovery is ready,
-    /// keeps them so the user can finish it.
+    /// Submit the form. The password is moved out of the UI so it is not retained after
+    /// submission; the username stays, so a failed sign-in needs only the password again.
+    /// An incomplete form, or one sent before discovery is ready, keeps both.
     fn sign_in(&mut self, core: &leafport_app::App, status: &Status) {
         if !status.sign_in_ready {
             return;
@@ -109,7 +109,7 @@ impl Account {
         }
         core.sign_in(
             method,
-            std::mem::take(&mut self.username),
+            self.username.clone(),
             std::mem::take(&mut self.password),
         );
     }
