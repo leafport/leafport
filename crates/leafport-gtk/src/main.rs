@@ -1,5 +1,8 @@
 //! Leafport for GNOME: a GTK4 and libadwaita front end for `leafport-app`.
 
+mod covers;
+mod row_menu;
+mod row_widget;
 mod store;
 mod window;
 

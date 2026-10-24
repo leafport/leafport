@@ -1,13 +1,16 @@
 //! The main window: split view with the account sidebar, header bar, banner and list.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use leafport_app::{App, Event, Snapshot, Status};
+use leafport_app::{App, Event, Row, Snapshot, Status};
 
+use crate::covers::Covers;
+use crate::row_menu;
+use crate::row_widget::RowWidget;
 use crate::store::{RowObject, RowStore};
 
 const SIGNED_OUT_HINT: &str = "Sign in to see the books in your account.";
@@ -15,7 +18,9 @@ const SIGNED_OUT_HINT: &str = "Sign in to see the books in your account.";
 /// The application window and the widgets that follow the app state.
 pub struct Window {
     window: adw::ApplicationWindow,
+    core: Arc<App>,
     store: RowStore,
+    covers: Rc<Covers>,
     /// Shows `signed-in` or `signed-out` in the sidebar.
     account: gtk::Stack,
     user: gtk::Label,
@@ -39,6 +44,7 @@ impl Window {
     /// Build the window for `app`, showing `snapshot`.
     pub fn new(app: &adw::Application, core: Arc<App>, snapshot: Snapshot) -> Rc<Window> {
         let store = RowStore::new();
+        let covers = Covers::new();
 
         // Sidebar.
         let user = gtk::Label::builder()
@@ -149,7 +155,7 @@ impl Window {
 
         let list = gtk::ListView::new(
             Some(gtk::NoSelection::new(Some(store.model()))),
-            Some(placeholder_factory()),
+            Some(row_factory(&covers)),
         );
         let scrolled = gtk::ScrolledWindow::builder()
             .child(&list)
@@ -231,7 +237,9 @@ impl Window {
 
         let this = Rc::new(Window {
             window,
+            core,
             store,
+            covers,
             account,
             user,
             refresh,
@@ -246,7 +254,9 @@ impl Window {
             list_hint,
             signed_out: Cell::new(true),
         });
-        let _forgotten_covers = this.store.set_rows(snapshot.rows);
+        this.window
+            .insert_action_group("row", Some(&row_menu::action_group(&this)));
+        this.store.set_rows(snapshot.rows);
         this.apply_status(&snapshot.status);
         this
     }
@@ -258,30 +268,76 @@ impl Window {
 
     /// Apply one event from the app.
     pub fn apply(&self, event: Event) {
-        // The returned cover paths are forgotten by the cover cache in Task 3.
-        match event {
-            Event::Rows { rows } => {
-                let _forgotten_covers = self.store.set_rows(rows);
+        let stale = match event {
+            Event::Rows { rows } => self.store.set_rows(rows),
+            Event::Row { row } => self.store.set_row(row),
+            Event::RowRemoved { key } => self.store.remove(&key),
+            Event::Progress { key, fraction } => {
+                self.store.progress(&key, fraction);
+                return;
             }
-            Event::Row { row } => {
-                let _forgotten_covers = self.store.set_row(row);
+            // `apply_status` updates the body itself.
+            Event::Status { status } => {
+                self.apply_status(&status);
+                return;
             }
-            Event::RowRemoved { key } => {
-                let _forgotten_covers = self.store.remove(&key);
-            }
-            Event::Progress { key, fraction } => self.store.progress(&key, fraction),
-            Event::Status { status } => self.apply_status(&status),
             // The sign-in dialog consumes providers in Task 4.
-            Event::Providers { .. } => {}
-        }
+            Event::Providers { .. } => return,
+        };
+        self.covers.forget(&stale);
         self.update_body();
     }
 
     /// The window widget.
-    // Tasks 4 and 5 use it as the parent of the sign-in and settings dialogs.
-    #[allow(dead_code)]
     pub fn widget(&self) -> adw::ApplicationWindow {
         self.window.clone()
+    }
+
+    /// The app core.
+    pub fn core(&self) -> Arc<App> {
+        self.core.clone()
+    }
+
+    /// The current row of `key`, if listed.
+    pub fn row(&self, key: &str) -> Option<Row> {
+        self.store.find(key).map(|object| object.row())
+    }
+
+    /// Ask before removing the title folder of `key`. Does nothing when the row is gone
+    /// or has no folder.
+    pub fn confirm_remove(&self, key: &str) {
+        let Some(row) = self.row(key) else {
+            return;
+        };
+        let Some(folder) = &row.folder else {
+            return;
+        };
+        let mut body = format!("This deletes {folder}.\nThe book stays in your cloud library.");
+        if row.on_loan {
+            body.push_str(
+                "\nThe loan is returned first. The folder is deleted once the return succeeds.",
+            );
+        }
+        let confirm = if row.on_loan {
+            "Return and remove"
+        } else {
+            "Remove"
+        };
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Remove \"{}\" from disk?", row.title)),
+            Some(&body),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("remove", confirm)]);
+        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let core = self.core.clone();
+        let key = row.key.clone();
+        let on_loan = row.on_loan;
+        dialog.connect_response(Some("remove"), move |_, _| {
+            core.remove(key.clone(), on_loan);
+        });
+        dialog.present(Some(&self.window));
     }
 
     fn apply_status(&self, status: &Status) {
@@ -339,22 +395,51 @@ fn set_spinning(spinner: &gtk::Spinner, spinning: bool) {
     spinner.set_spinning(spinning);
 }
 
-/// A label with the row title. Task 3 replaces it with the row widget.
-fn placeholder_factory() -> gtk::SignalListItemFactory {
+/// Row widgets over the store's `RowObject`s. Bound widgets reload their cover when
+/// `covers` reports it ready.
+fn row_factory(covers: &Rc<Covers>) -> gtk::SignalListItemFactory {
+    let bound: Rc<RefCell<Vec<RowWidget>>> = Rc::default();
+    covers.connect_ready(glib::clone!(
+        #[strong]
+        bound,
+        move |path| {
+            for widget in bound.borrow().iter() {
+                widget.cover_ready(path);
+            }
+        }
+    ));
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("a ListItem");
-        item.set_child(Some(&gtk::Label::builder().xalign(0.0).build()));
+        item.set_activatable(false);
+        item.set_child(Some(&RowWidget::new()));
     });
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(glib::clone!(
+        #[strong]
+        covers,
+        #[strong]
+        bound,
+        move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().expect("a ListItem");
+            let (Some(object), Some(widget)) = (
+                item.item().and_downcast::<RowObject>(),
+                item.child().and_downcast::<RowWidget>(),
+            ) else {
+                return;
+            };
+            widget.bind(&object, &covers);
+            let mut bound = bound.borrow_mut();
+            if !bound.contains(&widget) {
+                bound.push(widget);
+            }
+        }
+    ));
+    factory.connect_unbind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("a ListItem");
-        let (Some(object), Some(label)) = (
-            item.item().and_downcast::<RowObject>(),
-            item.child().and_downcast::<gtk::Label>(),
-        ) else {
-            return;
-        };
-        label.set_label(&object.row().title);
+        if let Some(widget) = item.child().and_downcast::<RowWidget>() {
+            widget.unbind();
+            bound.borrow_mut().retain(|other| other != &widget);
+        }
     });
     factory
 }
