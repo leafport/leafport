@@ -49,6 +49,23 @@ pub struct Window {
     settings: RefCell<Settings>,
     /// The open preferences dialog, if any.
     preferences: RefCell<Option<Rc<PreferencesDialog>>>,
+    /// The open remove dialog, if any.
+    removing: RefCell<Option<Removing>>,
+}
+
+/// An open remove dialog and the row state it shows.
+struct Removing {
+    key: String,
+    folder: String,
+    on_loan: bool,
+    dialog: adw::AlertDialog,
+}
+
+impl Removing {
+    /// The `App::remove` arguments while `live` is still the row as shown.
+    fn args(&self, live: Option<&Row>) -> Option<(String, bool)> {
+        remove_args((&self.folder, self.on_loan), live)
+    }
 }
 
 impl Window {
@@ -271,6 +288,7 @@ impl Window {
             dialog: RefCell::default(),
             settings: RefCell::new(snapshot.settings.clone()),
             preferences: RefCell::default(),
+            removing: RefCell::default(),
         });
         for button in [&sidebar_sign_in, &status_sign_in, &hint_sign_in] {
             let this = Rc::downgrade(&this);
@@ -323,6 +341,7 @@ impl Window {
                 return;
             }
         }
+        self.close_stale_remove();
         self.update_body();
     }
 
@@ -417,18 +436,42 @@ impl Window {
         dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
-        // The row may change while the dialog is open: read it again on confirm.
+        // The row may change while the dialog is open: `close_stale_remove` closes it
+        // then, and a confirm acts only on the row as shown.
         let window = Rc::downgrade(self);
-        let key = row.key.clone();
-        dialog.connect_response(Some("remove"), move |_, _| {
+        dialog.connect_response(None, move |dialog, response| {
             let Some(window) = window.upgrade() else {
                 return;
             };
-            if let Some((key, on_loan)) = remove_args(window.row(&key).as_ref()) {
+            let removing = window
+                .removing
+                .borrow_mut()
+                .take_if(|removing| removing.dialog == *dialog);
+            if let Some(removing) = removing
+                && response == "remove"
+                && let Some((key, on_loan)) = removing.args(window.row(&removing.key).as_ref())
+            {
                 window.core.remove(key, on_loan);
             }
         });
+        *self.removing.borrow_mut() = Some(Removing {
+            key: row.key.clone(),
+            folder: folder.clone(),
+            on_loan: row.on_loan,
+            dialog: dialog.clone(),
+        });
         dialog.present(Some(&self.window));
+    }
+
+    /// Close the remove dialog when its row is gone or its folder or loan changed.
+    fn close_stale_remove(&self) {
+        let stale = self
+            .removing
+            .borrow_mut()
+            .take_if(|removing| removing.args(self.row(&removing.key).as_ref()).is_none());
+        if let Some(removing) = stale {
+            removing.dialog.close();
+        }
     }
 
     fn apply_status(&self, status: &Status) {
@@ -477,12 +520,14 @@ impl Window {
     }
 }
 
-/// The arguments of `App::remove` for `row`: its key and live `on_loan`. `None` when the
-/// row is gone or has no folder.
-fn remove_args(row: Option<&Row>) -> Option<(String, bool)> {
-    let row = row?;
-    row.folder.as_ref()?;
-    Some((row.key.clone(), row.on_loan))
+/// The arguments of `App::remove` for `live`, the row now listed: its key and `on_loan`.
+/// `None` when the row is gone, or its folder or `on_loan` differs from `shown`, what the
+/// remove dialog showed.
+fn remove_args(shown: (&str, bool), live: Option<&Row>) -> Option<(String, bool)> {
+    let row = live?;
+    let (folder, on_loan) = shown;
+    (row.folder.as_deref() == Some(folder) && row.on_loan == on_loan)
+        .then(|| (row.key.clone(), row.on_loan))
 }
 
 fn vbox(spacing: i32) -> gtk::Box {
@@ -599,22 +644,42 @@ mod tests {
 
     #[test]
     fn remove_args_skips_gone_row() {
-        assert_eq!(remove_args(None), None);
+        assert_eq!(remove_args(("/b/t", false), None), None);
     }
 
     #[test]
     fn remove_args_skips_row_without_folder() {
-        assert_eq!(remove_args(Some(&row(None, false))), None);
+        assert_eq!(remove_args(("/b/t", false), Some(&row(None, false))), None);
     }
 
     #[test]
-    fn remove_args_uses_live_on_loan() {
+    fn remove_args_skips_row_with_other_folder() {
         assert_eq!(
-            remove_args(Some(&row(Some("/b/t"), false))),
+            remove_args(("/b/t", false), Some(&row(Some("/n/t"), false))),
+            None
+        );
+    }
+
+    #[test]
+    fn remove_args_skips_row_whose_loan_changed() {
+        assert_eq!(
+            remove_args(("/b/t", false), Some(&row(Some("/b/t"), true))),
+            None
+        );
+        assert_eq!(
+            remove_args(("/b/t", true), Some(&row(Some("/b/t"), false))),
+            None
+        );
+    }
+
+    #[test]
+    fn remove_args_of_row_as_shown() {
+        assert_eq!(
+            remove_args(("/b/t", false), Some(&row(Some("/b/t"), false))),
             Some(("k1".to_owned(), false))
         );
         assert_eq!(
-            remove_args(Some(&row(Some("/b/t"), true))),
+            remove_args(("/b/t", true), Some(&row(Some("/b/t"), true))),
             Some(("k1".to_owned(), true))
         );
     }
