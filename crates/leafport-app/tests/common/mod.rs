@@ -323,7 +323,7 @@ impl Ops for FakeOps {
         _catalog: &VendorCatalog,
         method: &str,
         username: String,
-        _password: String,
+        _password: zeroize::Zeroizing<String>,
     ) -> Result<String, String> {
         let call = Call::SignIn {
             method: method.into(),

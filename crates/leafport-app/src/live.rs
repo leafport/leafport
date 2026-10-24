@@ -49,7 +49,7 @@ impl Ops for LiveOps {
         catalog: &VendorCatalog,
         method: &str,
         username: String,
-        password: String,
+        password: zeroize::Zeroizing<String>,
     ) -> Result<String, String> {
         let info = catalog.service_info();
         let (auth_url, certificate) = match (info.auth_url.clone(), info.certificate.clone()) {

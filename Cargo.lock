@@ -2178,6 +2178,7 @@ dependencies = [
  "leafport-core",
  "machine-uid",
  "sha1 0.11.0",
+ "zeroize",
 ]
 
 [[package]]

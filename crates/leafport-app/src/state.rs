@@ -104,7 +104,7 @@ pub(crate) enum Msg {
     SignIn {
         method: String,
         username: String,
-        password: String,
+        password: zeroize::Zeroizing<String>,
     },
     /// A finished sign-in: the account label.
     SignedIn(Result<String, String>),
@@ -945,7 +945,7 @@ mod tests {
             _: &VendorCatalog,
             _: &str,
             _: String,
-            _: String,
+            _: zeroize::Zeroizing<String>,
         ) -> Result<String, String> {
             unreachable!()
         }

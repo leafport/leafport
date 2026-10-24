@@ -131,12 +131,13 @@ impl App {
 
     /// Sign in with the provider `method`. Needs loaded providers; otherwise
     /// `Status.sign_in_error` says so. Does nothing while signed in or while a sign-in or
-    /// sign-out runs. The password is passed on to the worker and never kept.
+    /// sign-out runs. The password is passed on to the worker and never kept; its memory
+    /// is wiped once the worker drops it.
     pub fn sign_in(&self, method: String, username: String, password: String) {
         self.send(Msg::SignIn {
             method,
             username,
-            password,
+            password: zeroize::Zeroizing::new(password),
         });
     }
 

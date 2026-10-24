@@ -6,6 +6,7 @@ use leafport_core::cloud::DownloadRecord;
 use leafport_core::library::{Item, Library, Metadata, SyncOutcome, paths};
 use leafport_core::service::CancelToken;
 use leafport_core::vendors::VendorCatalog;
+use zeroize::Zeroizing;
 
 /// Where the app keeps its settings and the cloud list cache.
 #[derive(Clone, Debug, PartialEq)]
@@ -42,13 +43,14 @@ pub trait Ops: Send + Sync + 'static {
     /// The sign-in provider catalog.
     fn load_providers(&self) -> Result<VendorCatalog, String>;
 
-    /// Sign in with `method` from `catalog`; returns the activated account label.
+    /// Sign in with `method` from `catalog`; returns the activated account label. The
+    /// password is wiped from memory when dropped.
     fn sign_in(
         &self,
         catalog: &VendorCatalog,
         method: &str,
         username: String,
-        password: String,
+        password: Zeroizing<String>,
     ) -> Result<String, String>;
 
     /// Forget the stored activation.
