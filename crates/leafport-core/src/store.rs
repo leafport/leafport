@@ -65,7 +65,8 @@ impl fmt::Display for StoreError {
 impl Error for StoreError {}
 
 /// Platform adapter over the OS credential store. Secrets are opaque bytes; the
-/// adapter never interprets them. `load` returns `None` when no record exists.
+/// adapter never interprets them. `load` returns `None` when no record exists, and
+/// `delete` of an absent record succeeds.
 pub trait CredentialStore {
     fn load(&self, account: &str) -> Result<Option<Vec<u8>>, StoreError>;
     fn save(&self, account: &str, secret: &[u8]) -> Result<(), StoreError>;
@@ -326,11 +327,9 @@ impl<S: CredentialStore> ChunkedStore<S> {
             ChunkLayout::Legacy { count } | ChunkLayout::Generation { count, .. } => count,
         };
         for index in first..count.max(first) + SWEEP_EXTRA {
-            let name = Self::chunk_account(account, layout, index);
-            if let Some(mut chunk) = self.0.load(&name)? {
-                chunk.zeroize();
-                self.0.delete(&name)?;
-            }
+            // Deleting an absent entry succeeds, so no secret is read just to probe.
+            self.0
+                .delete(&Self::chunk_account(account, layout, index))?;
         }
         Ok(())
     }
