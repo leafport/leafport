@@ -3,7 +3,7 @@ name = "leafport-desktop"
 version.workspace = true
 edition.workspace = true
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 leafport-app = { path = "../leafport-app" }
 leafport-core = { path = "../leafport-core" }
 
