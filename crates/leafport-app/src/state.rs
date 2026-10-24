@@ -824,8 +824,7 @@ impl Reactor {
                         if library.root.as_os_str().is_empty() {
                             return Err("no books folder configured".into());
                         }
-                        Acsm::parse(String::from_utf8_lossy(&acsm).into_owned())
-                            .map_err(|e| e.to_string())?;
+                        // The library parses the ACSM before any request goes out.
                         let send = |msg: Msg| {
                             if let Some(tx) = tx.upgrade() {
                                 let _ = tx.send(msg);
@@ -856,15 +855,17 @@ impl Reactor {
                     if library.root.as_os_str().is_empty() {
                         return Err("no books folder configured".into());
                     }
-                    // Reject unreadable or malformed imports before registering a device.
+                    // Reject unreadable or malformed imports before touching the
+                    // activation. Decoded as the library decodes it.
                     use std::io::Read;
-                    let mut acsm = String::new();
+                    let mut acsm = Vec::new();
                     std::fs::File::open(&path)
                         .map_err(|e| e.to_string())?
                         .take(MAX_ACSM_BYTES as u64 + 1)
-                        .read_to_string(&mut acsm)
+                        .read_to_end(&mut acsm)
                         .map_err(|e| e.to_string())?;
-                    Acsm::parse(acsm).map_err(|e| e.to_string())?;
+                    Acsm::parse(String::from_utf8_lossy(&acsm).into_owned())
+                        .map_err(|e| e.to_string())?;
                     ops.import(&library, &path)
                 },
                 Msg::Imported,

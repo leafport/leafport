@@ -305,3 +305,17 @@ fn import_rejects_malformed_acsm_before_calling_ops() {
     assert!(s.app.snapshot().status.banner[0].starts_with("Import failed: "));
     s.script.no_call_within(200);
 }
+
+#[test]
+fn import_accepts_an_acsm_that_is_not_utf8() {
+    let s = start();
+    let path = s.dir.path().join("latin1.acsm");
+    // A Latin-1 "é". The library reads ACSMs leniently, so the app does not reject it.
+    let bytes: Vec<u8> = acsm_xml("urn:uuid:9", "Caf\u{1}")
+        .bytes()
+        .map(|b| if b == 1 { 0xE9 } else { b })
+        .collect();
+    std::fs::write(&path, bytes).unwrap();
+    s.app.import_acsm(path.to_string_lossy().into_owned());
+    assert_eq!(s.script.next_call(), Call::Import(path));
+}
