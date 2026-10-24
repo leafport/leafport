@@ -1,8 +1,8 @@
 mod common;
 
 use leafport_core::cloud::{
-    CloudClient, CloudError, CloudResponseError, PRODUCTION_BASE, acknowledge_upload,
-    download_records, download_request, sync_to_cloud, sync_to_device, upload_request,
+    CloudError, CloudResponseError, PRODUCTION_BASE, acknowledge_upload, download_records,
+    download_request, sync_to_cloud, sync_to_device, upload_request,
 };
 use leafport_core::signing::RequestSigningError;
 
@@ -83,8 +83,8 @@ fn upload_acknowledgment_requires_explicit_success() {
 }
 
 #[test]
-fn cloud_client_accepts_only_plain_http_bases() {
-    assert!(CloudClient::new(leafport_core::cloud::PRODUCTION_BASE).is_ok());
+fn cloud_calls_accept_only_plain_http_bases() {
+    let transport = common::FakeTransport::new();
     for base in [
         "ftp://h/x",
         "https://user:pw@h/x",
@@ -93,10 +93,14 @@ fn cloud_client_accepts_only_plain_http_bases() {
         "not a url",
     ] {
         assert!(
-            matches!(CloudClient::new(base), Err(CloudError::Endpoint)),
+            matches!(
+                sync_to_device(&transport, base, "u", common::key()),
+                Err(CloudError::Endpoint)
+            ),
             "{base}"
         );
     }
+    assert!(transport.requests.lock().unwrap().is_empty());
 }
 
 #[test]

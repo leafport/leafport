@@ -41,53 +41,6 @@ impl fmt::Display for CloudError {
 }
 impl Error for CloudError {}
 
-/// Blocking client. Desktop callers execute these operations off the UI thread.
-/// The selected base is explicit so staging and discovered environments are not
-/// silently replaced with production. This layer does not persist sync dates.
-pub struct CloudClient {
-    service: crate::service::ServiceClient,
-    base: reqwest::Url,
-}
-
-impl CloudClient {
-    pub fn new(base: &str) -> Result<Self, CloudError> {
-        let base = endpoint(base)?;
-        Ok(Self {
-            service: crate::service::ServiceClient::new().map_err(CloudError::Transport)?,
-            base,
-        })
-    }
-
-    pub fn download(
-        &self,
-        user: &str,
-        from_date: Option<&str>,
-        to_date: Option<&str>,
-        key: &RsaPrivateKey,
-    ) -> Result<Vec<DownloadRecord>, CloudError> {
-        let request =
-            download_request(user, from_date, to_date, key).map_err(CloudError::Signing)?;
-        exchange(
-            &self.service,
-            &self.base,
-            DOWNLOAD_OPERATION,
-            request,
-            download_records,
-        )
-    }
-
-    pub fn upload(&self, user: &str, acsm: &[u8], key: &RsaPrivateKey) -> Result<(), CloudError> {
-        let request = upload_request(user, acsm, key).map_err(CloudError::Signing)?;
-        exchange(
-            &self.service,
-            &self.base,
-            UPLOAD_OPERATION,
-            request,
-            acknowledge_upload,
-        )
-    }
-}
-
 /// Validate a cloud base URL and normalise its path to end in `/`.
 fn endpoint(base: &str) -> Result<reqwest::Url, CloudError> {
     let mut base = reqwest::Url::parse(base).map_err(|_| CloudError::Endpoint)?;
