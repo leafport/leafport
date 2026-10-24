@@ -8,6 +8,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use leafport_app::{App, Event, Row, Snapshot, Status};
 
+use crate::account::{Account, SignInDialog};
 use crate::covers::Covers;
 use crate::row_menu;
 use crate::row_widget::RowWidget;
@@ -26,7 +27,7 @@ pub struct Window {
     user: gtk::Label,
     refresh: gtk::Button,
     refresh_spinner: gtk::Spinner,
-    /// The account note below the refresh button. Task 4 fills it.
+    /// The account note below the refresh button.
     note: gtk::Label,
     importing: gtk::Box,
     importing_spinner: gtk::Spinner,
@@ -38,6 +39,11 @@ pub struct Window {
     /// The sign-in hint above the list while signed out.
     list_hint: gtk::Box,
     signed_out: Cell<bool>,
+    sign_in: RefCell<Account>,
+    /// The latest status from the app.
+    status: RefCell<Status>,
+    /// The open sign-in dialog, if any.
+    dialog: RefCell<Option<Rc<SignInDialog>>>,
 }
 
 impl Window {
@@ -70,7 +76,8 @@ impl Window {
                 .xalign(0.0)
                 .build(),
         );
-        signed_out.append(&sign_in_button());
+        let sidebar_sign_in = sign_in_button();
+        signed_out.append(&sidebar_sign_in);
 
         let account = gtk::Stack::new();
         account.add_named(&signed_in, Some("signed-in"));
@@ -151,7 +158,8 @@ impl Window {
         list_hint.set_margin_start(12);
         list_hint.set_margin_end(12);
         list_hint.append(&gtk::Label::new(Some(SIGNED_OUT_HINT)));
-        list_hint.append(&sign_in_button());
+        let hint_sign_in = sign_in_button();
+        list_hint.append(&hint_sign_in);
 
         let list = gtk::ListView::new(
             Some(gtk::NoSelection::new(Some(store.model()))),
@@ -197,7 +205,7 @@ impl Window {
         breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(breakpoint);
 
-        // Handlers. "Sign in" stays unconnected until Task 4.
+        // Handlers. The "Sign in" buttons are connected once the window is shared.
         sign_out.connect_clicked(glib::clone!(
             #[strong]
             core,
@@ -253,7 +261,18 @@ impl Window {
             body,
             list_hint,
             signed_out: Cell::new(true),
+            sign_in: RefCell::new(Account::new(&snapshot.status)),
+            status: RefCell::new(snapshot.status.clone()),
+            dialog: RefCell::default(),
         });
+        for button in [&sidebar_sign_in, &status_sign_in, &hint_sign_in] {
+            let this = Rc::downgrade(&this);
+            button.connect_clicked(move |_| {
+                if let Some(this) = this.upgrade() {
+                    SignInDialog::present(&this);
+                }
+            });
+        }
         this.window
             .insert_action_group("row", Some(&row_menu::action_group(&this)));
         this.store.set_rows(snapshot.rows);
@@ -278,11 +297,23 @@ impl Window {
             }
             // `apply_status` updates the body itself.
             Event::Status { status } => {
+                let old = self.status.replace(status.clone());
+                let finished = self.sign_in.borrow_mut().on_status(&old, &status);
                 self.apply_status(&status);
+                self.update_dialog();
+                if finished {
+                    let dialog = self.dialog.borrow().clone();
+                    if let Some(dialog) = dialog {
+                        dialog.close();
+                    }
+                }
                 return;
             }
-            // The sign-in dialog consumes providers in Task 4.
-            Event::Providers { .. } => return,
+            Event::Providers { result } => {
+                self.sign_in.borrow_mut().on_providers(result);
+                self.update_dialog();
+                return;
+            }
         };
         self.covers.forget(&stale);
         self.update_body();
@@ -291,6 +322,26 @@ impl Window {
     /// The window widget.
     pub fn widget(&self) -> adw::ApplicationWindow {
         self.window.clone()
+    }
+
+    /// The sign-in account state.
+    pub fn account(&self) -> &RefCell<Account> {
+        &self.sign_in
+    }
+
+    /// The latest status from the app.
+    pub fn status(&self) -> Status {
+        self.status.borrow().clone()
+    }
+
+    /// The open sign-in dialog, if any.
+    pub fn dialog(&self) -> Option<Rc<SignInDialog>> {
+        self.dialog.borrow().clone()
+    }
+
+    /// Remember the open sign-in dialog, or forget it once it is closed.
+    pub fn set_dialog(&self, dialog: Option<Rc<SignInDialog>>) {
+        *self.dialog.borrow_mut() = dialog;
     }
 
     /// The app core.
@@ -356,7 +407,9 @@ impl Window {
         self.refresh
             .set_sensitive(status.user.is_some() && !status.refreshing);
         set_spinning(&self.refresh_spinner, status.refreshing);
-        self.note.set_visible(!self.note.label().is_empty());
+        let note = self.sign_in.borrow().note(status);
+        self.note.set_visible(!note.is_empty());
+        self.note.set_label(&note);
 
         self.importing.set_visible(status.importing);
         set_spinning(&self.importing_spinner, status.importing);
@@ -369,6 +422,13 @@ impl Window {
         self.signed_out.set(status.user.is_none());
         self.list_hint.set_visible(status.user.is_none());
         self.update_body();
+    }
+
+    fn update_dialog(&self) {
+        let dialog = self.dialog.borrow().clone();
+        if let Some(dialog) = dialog {
+            dialog.update(&self.sign_in.borrow(), &self.status.borrow());
+        }
     }
 
     /// Show the status page while signed out with no rows, the list otherwise.
@@ -394,7 +454,7 @@ fn vbox(spacing: i32) -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Vertical, spacing)
 }
 
-/// A "Sign in" button. Task 4 connects it to the sign-in dialog.
+/// A "Sign in" button. `Window::new` connects it to the sign-in dialog.
 fn sign_in_button() -> gtk::Button {
     gtk::Button::builder()
         .label("Sign in")
