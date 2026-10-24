@@ -24,6 +24,8 @@ fn theme_label(theme: &Theme) -> &'static str {
 pub struct SettingsView {
     pub open: bool,
     draft: Settings,
+    /// Why the last folder choice was not taken.
+    folder_error: Option<String>,
 }
 
 impl Default for SettingsView {
@@ -34,6 +36,7 @@ impl Default for SettingsView {
                 books_dir: None,
                 theme: Theme::System,
             },
+            folder_error: None,
         }
     }
 }
@@ -42,6 +45,7 @@ impl SettingsView {
     /// Open the window with a copy of the current settings.
     pub fn open(&mut self, current: &Settings) {
         self.draft = current.clone();
+        self.folder_error = None;
         self.open = true;
     }
 
@@ -76,9 +80,25 @@ impl SettingsView {
                         .clicked()
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
-                        self.draft.books_dir = Some(dir.to_string_lossy().into_owned());
+                        // Settings carry the folder as text; a lossy copy would name
+                        // another folder.
+                        match dir.to_str() {
+                            Some(dir) => {
+                                self.draft.books_dir = Some(dir.to_owned());
+                                self.folder_error = None;
+                            }
+                            None => {
+                                self.folder_error = Some(format!(
+                                    "{} cannot be used: its name is not valid Unicode.",
+                                    dir.display()
+                                ));
+                            }
+                        }
                     }
                 });
+                if let Some(error) = &self.folder_error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
                 ui.weak("Existing title folders are not moved.");
                 if busy {
                     ui.weak("The books folder can change once the running sync finishes.");
