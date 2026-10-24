@@ -328,10 +328,14 @@ impl SignInDialog {
                 }
             }
         ));
-        self.username.connect_entry_activated({
-            let submit = submit.clone();
-            move |_| submit()
-        });
+        // Enter in Username moves on to Password; Enter in Password submits.
+        self.username.connect_entry_activated(glib::clone!(
+            #[weak(rename_to = password)]
+            self.password,
+            move |_| {
+                password.grab_focus();
+            }
+        ));
         self.password.connect_entry_activated(move |_| submit());
         self.dialog.connect_closed(glib::clone!(
             #[strong]
