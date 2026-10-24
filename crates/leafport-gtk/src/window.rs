@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use leafport_app::{App, Event, Row, Snapshot, Status};
+use leafport_app::{App, Event, Row, Settings, Snapshot, Status};
 
 use crate::account::{Account, SignInDialog};
 use crate::covers::Covers;
 use crate::row_menu;
 use crate::row_widget::RowWidget;
+use crate::settings::PreferencesDialog;
 use crate::store::{RowObject, RowStore};
 
 const SIGNED_OUT_HINT: &str = "Sign in to see the books in your account.";
@@ -44,6 +45,10 @@ pub struct Window {
     status: RefCell<Status>,
     /// The open sign-in dialog, if any.
     dialog: RefCell<Option<Rc<SignInDialog>>>,
+    /// The settings in effect.
+    settings: RefCell<Settings>,
+    /// The open preferences dialog, if any.
+    preferences: RefCell<Option<Rc<PreferencesDialog>>>,
 }
 
 impl Window {
@@ -264,6 +269,8 @@ impl Window {
             sign_in: RefCell::new(Account::new(&snapshot.status)),
             status: RefCell::new(snapshot.status.clone()),
             dialog: RefCell::default(),
+            settings: RefCell::new(snapshot.settings.clone()),
+            preferences: RefCell::default(),
         });
         for button in [&sidebar_sign_in, &status_sign_in, &hint_sign_in] {
             let this = Rc::downgrade(&this);
@@ -301,6 +308,7 @@ impl Window {
                 let finished = self.sign_in.borrow_mut().on_status(&old, &status);
                 self.apply_status(&status);
                 self.update_dialog();
+                self.update_preferences();
                 if finished {
                     let dialog = self.dialog.borrow().clone();
                     if let Some(dialog) = dialog {
@@ -342,6 +350,34 @@ impl Window {
     /// Remember the open sign-in dialog, or forget it once it is closed.
     pub fn set_dialog(&self, dialog: Option<Rc<SignInDialog>>) {
         *self.dialog.borrow_mut() = dialog;
+    }
+
+    /// The settings in effect.
+    pub fn settings(&self) -> Settings {
+        self.settings.borrow().clone()
+    }
+
+    /// Remember the settings now in effect.
+    pub fn set_settings(&self, settings: Settings) {
+        *self.settings.borrow_mut() = settings;
+    }
+
+    /// The open preferences dialog, if any.
+    pub fn preferences(&self) -> Option<Rc<PreferencesDialog>> {
+        self.preferences.borrow().clone()
+    }
+
+    /// Remember the open preferences dialog, or forget it once it is closed.
+    pub fn set_preferences(&self, dialog: Option<Rc<PreferencesDialog>>) {
+        *self.preferences.borrow_mut() = dialog;
+    }
+
+    /// Show the settings in effect in the open preferences dialog.
+    pub fn update_preferences(&self) {
+        let dialog = self.preferences.borrow().clone();
+        if let Some(dialog) = dialog {
+            dialog.update(&self.settings.borrow(), &self.status.borrow());
+        }
     }
 
     /// The app core.

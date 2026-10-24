@@ -4,6 +4,7 @@ mod account;
 mod covers;
 mod row_menu;
 mod row_widget;
+mod settings;
 mod store;
 mod window;
 
@@ -89,15 +90,28 @@ fn main() -> glib::ExitCode {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
-    app.connect_startup(|app| {
-        // The settings dialog arrives in Task 5.
-        let preferences = gio::ActionEntry::builder("preferences")
-            .activate(|_: &adw::Application, _, _| {})
-            .build();
-        app.add_action_entries([preferences]);
-        app.set_accels_for_action("app.preferences", &["<Control>comma"]);
-    });
     let slot: Rc<RefCell<Option<Rc<Shell>>>> = Rc::default();
+    app.connect_startup(glib::clone!(
+        #[strong]
+        slot,
+        move |app| {
+            // The action only exists once a window does; the menu is in the window.
+            let preferences = gio::ActionEntry::builder("preferences")
+                .activate(glib::clone!(
+                    #[strong]
+                    slot,
+                    move |_: &adw::Application, _, _| {
+                        let shell = slot.borrow().clone();
+                        if let Some(shell) = shell {
+                            settings::present(&shell.window);
+                        }
+                    }
+                ))
+                .build();
+            app.add_action_entries([preferences]);
+            app.set_accels_for_action("app.preferences", &["<Control>comma"]);
+        }
+    ));
     app.connect_activate(glib::clone!(
         #[strong]
         slot,
