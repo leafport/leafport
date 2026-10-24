@@ -239,11 +239,13 @@ fn sign_in_success_bumps_generation() {
     // The new generation resets `refreshing`, so a new refresh may start.
     s.wait_status(|st| st.user.as_deref() == Some("user@x") && !st.refreshing);
 
-    // The refresh that started under the old account finishes: its result is discarded,
-    // and the cache it may have rewritten is removed.
-    std::fs::write(s.cache(), cache_xml(&[(B, "B")])).unwrap();
+    // The refresh that started under the old account finishes: its result and the file
+    // it wrote are discarded, and the cache is not written.
+    let part = s.dir.path().join("cache.xml.0.part");
+    std::fs::write(&part, cache_xml(&[(B, "B")])).unwrap();
     s.script.refresh.send(Ok(vec![record(B, "B")])).unwrap();
-    until(|| !s.cache().exists());
+    until(|| !part.exists());
+    assert!(!s.cache().exists());
     assert!(s.row(B).is_none());
 
     // A fresh refresh works again.
@@ -251,6 +253,20 @@ fn sign_in_success_bumps_generation() {
     assert_eq!(s.script.next_call(), Call::Refresh);
     s.script.refresh.send(Ok(vec![record(B, "B")])).unwrap();
     s.recorder.wait_for(|_| s.row(B).is_some());
+}
+
+#[test]
+fn current_refresh_moves_its_file_to_the_cache() {
+    let s = start_with(Some("user@x"), &[(A, "A")], |_| {});
+    s.app.refresh();
+    assert_eq!(s.script.next_call(), Call::Refresh);
+    let part = s.dir.path().join("cache.xml.0.part");
+    let listed = cache_xml(&[(B, "B")]);
+    std::fs::write(&part, &listed).unwrap();
+    s.script.refresh.send(Ok(vec![record(B, "B")])).unwrap();
+    s.recorder.wait_for(|_| s.row(B).is_some());
+    assert!(!part.exists());
+    assert_eq!(std::fs::read_to_string(s.cache()).unwrap(), listed);
 }
 
 #[test]

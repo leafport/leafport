@@ -389,6 +389,40 @@ impl State {
         self.refreshing = false;
     }
 
+    /// Where the refresh started under `generation` writes the cloud list. Only a
+    /// refresh that is still current when it finishes moves it to the cache, so a
+    /// refresh of a signed-out account never writes the cache itself.
+    fn refresh_file(&self, generation: u64) -> Option<PathBuf> {
+        self.paths.cache.as_ref().map(|cache| {
+            let mut name = cache.as_os_str().to_owned();
+            name.push(format!(".{generation}.part"));
+            PathBuf::from(name)
+        })
+    }
+
+    fn remove_refresh_file(&mut self, generation: u64) {
+        if let Some(path) = self.refresh_file(generation) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => self.add_banner(format!("Could not remove {}: {e}", path.display())),
+            }
+        }
+    }
+
+    /// Make the list the current refresh wrote the cache.
+    fn adopt_refresh_file(&mut self, generation: u64) {
+        let (Some(part), Some(cache)) = (self.refresh_file(generation), self.paths.cache.clone())
+        else {
+            return;
+        };
+        match std::fs::rename(&part, &cache) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.add_banner(format!("Could not save the cloud list cache: {e}")),
+        }
+    }
+
     pub(crate) fn remove_cache(&mut self) {
         if let Some(path) = &self.paths.cache {
             match std::fs::remove_file(path) {
@@ -523,18 +557,22 @@ impl Reactor {
             Msg::Refreshed { generation, .. }
                 if generation != state.generation || state.user.is_none() =>
             {
-                // Started before a sign-in or sign-out: it may have rewritten the cache
-                // after sign-out removed it. Drop it; the user refreshes again if wanted.
-                state.remove_cache();
+                // Started before a sign-in or sign-out: drop its list, and the file it
+                // wrote, without touching the cache. The user refreshes again if wanted.
+                state.remove_refresh_file(generation);
             }
-            Msg::Refreshed { result, .. } => {
+            Msg::Refreshed { generation, result } => {
                 state.refreshing = false;
                 match result {
                     Ok(cloud) => {
+                        state.adopt_refresh_file(generation);
                         state.cloud = cloud;
                         state.remerge();
                     }
-                    Err(e) => state.add_banner(format!("Refresh failed: {e}")),
+                    Err(e) => {
+                        state.remove_refresh_file(generation);
+                        state.add_banner(format!("Refresh failed: {e}"));
+                    }
                 }
             }
             Msg::Sync(key) => self.enqueue_sync(state, key),
@@ -857,12 +895,12 @@ impl Reactor {
         }
         state.refreshing = true;
         let generation = state.generation;
-        let cache: Option<PathBuf> = state.paths.cache.clone();
+        let file = state.refresh_file(generation);
         let ops = self.ops.clone();
         self.spawn(
             move || {
-                let cache = cache.ok_or_else(|| "no data directory".to_string())?;
-                ops.refresh(&cache)
+                let file = file.ok_or_else(|| "no data directory".to_string())?;
+                ops.refresh(&file)
             },
             move |result| Msg::Refreshed { generation, result },
         );
