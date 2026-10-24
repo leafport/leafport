@@ -251,7 +251,9 @@ impl ServiceClient {
         let http = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(15))
-            // Fulfilled downloads can be large; allow a longer overall deadline.
+            // The blocking client applies this to the wait for the response headers and
+            // to each body read, not to the whole body: a large book on a slow link
+            // completes, and only a connection stalled this long fails.
             .timeout(Duration::from_secs(300))
             // ADEPT relies on signatures, so http is allowed; cap redirect chains
             // and refuse https -> http downgrades and non-http(s) schemes.
