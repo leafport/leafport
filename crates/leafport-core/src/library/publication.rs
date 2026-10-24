@@ -410,7 +410,7 @@ fn pdf_title(publication: &[u8]) -> Option<String> {
     })
 }
 
-/// A PDF text string: UTF-16 with a BOM, UTF-8 with a BOM, else Latin-1 (PDFDocEncoding).
+/// A PDF text string: UTF-16 with a BOM, UTF-8 with a BOM, else PDFDocEncoding.
 fn decode_pdf_text(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units = rest
@@ -433,7 +433,24 @@ fn decode_pdf_text(bytes: &[u8]) -> String {
     } else if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         String::from_utf8_lossy(rest).into_owned()
     } else {
-        bytes.iter().map(|&b| b as char).collect()
+        bytes.iter().map(|&b| pdf_doc_char(b)).collect()
+    }
+}
+
+/// One PDFDocEncoding byte (ISO 32000-1, Annex D). It is Latin-1 except for
+/// 0x18–0x1F and 0x7F–0xA0, where it has accents, typographic marks and ligatures;
+/// its undefined codes become U+FFFD.
+fn pdf_doc_char(byte: u8) -> char {
+    const LOW: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+    const HIGH: [char; 34] = [
+        '\u{FFFD}', '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘',
+        '’', '‚', '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž', '\u{FFFD}', '€',
+    ];
+    match byte {
+        0x18..=0x1F => LOW[usize::from(byte - 0x18)],
+        0x7F..=0xA0 => HIGH[usize::from(byte - 0x7F)],
+        0xAD => '\u{FFFD}',
+        _ => char::from(byte),
     }
 }
 

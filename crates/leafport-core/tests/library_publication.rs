@@ -434,6 +434,22 @@ fn book_title_reads_pdf_info_ebx_title_then_title() {
         .as_deref(),
         Some("été")
     );
+    // PDFDocEncoding, not Latin-1, above 0x7E: quotes and dashes, not C1 controls.
+    assert_eq!(
+        book_title(
+            &pdf_with(
+                &[(
+                    "Title",
+                    vec![0x8D, b'H', b'i', 0x8E, b' ', 0x84, b' ', 0xA0]
+                )],
+                None,
+                false
+            ),
+            Format::Pdf
+        )
+        .as_deref(),
+        Some("“Hi” — €")
+    );
 }
 
 #[test]
