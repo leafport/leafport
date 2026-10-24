@@ -909,6 +909,26 @@ fn return_loan_error_keeps_loan() {
 }
 
 #[test]
+fn return_loan_says_when_only_the_local_update_failed() {
+    let root = tempdir();
+    let item = loan_item(root.path());
+    // A folder in the way makes the metadata.yaml rename fail.
+    let metadata_file = root.path().join("White Sand [a]").join("metadata.yaml");
+    std::fs::remove_file(&metadata_file).unwrap();
+    std::fs::create_dir(&metadata_file).unwrap();
+    let t = FakeTransport::new().respond(
+        "/fulfillment/LoanReturn",
+        200,
+        "<envelope xmlns=\"http://ns.adobe.com/adept\"/>",
+    );
+    let err = return_loan(&item, &activation(), &t).unwrap_err();
+    assert!(
+        err.to_string().starts_with("the loan was returned, but "),
+        "{err}"
+    );
+}
+
+#[test]
 fn return_loan_works_for_local_row_without_cloud_record() {
     let root = tempdir();
     sync(

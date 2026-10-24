@@ -1,66 +1,46 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod account;
-mod jobs;
 mod list;
 mod settings_view;
 
 use eframe::egui;
-use jobs::{Event, Job};
-use leafport_core::{
-    cloud::DownloadRecord,
-    library::{Item, ItemState, Library, Settings, load_cache, merge, paths},
-};
+use leafport_app::{Activity, AppError, Event, Listener, Row, Settings, Status};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
 };
 
-/// The most banner messages kept; older ones drop off.
-const BANNER_LINES: usize = 5;
-
-pub struct App {
-    pub library: Library,
-    pub cloud: Vec<DownloadRecord>,
-    pub rows: Vec<Item>,
-    /// Last sync error per row key, held in memory only.
-    pub failures: HashMap<String, String>,
-    /// The sync or import whose worker runs (at most one).
-    pub running: Option<Job>,
-    /// Download progress of the running sync, once its book download reports one.
-    pub progress: Option<f32>,
-    /// Cancel flag of the running sync.
-    pub cancel: Option<leafport_core::service::CancelToken>,
-    /// Syncs and imports waiting to run, in the order requested.
-    pub queue: VecDeque<Job>,
-    /// Rows whose loan return runs.
-    pub returning: HashSet<String>,
-    /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
-    pub row_errors: HashMap<String, String>,
-    /// Row whose removal awaits confirmation.
-    confirm_remove: Option<String>,
-    /// Rows whose folder is removed once their loan return succeeds.
-    remove_after_return: HashSet<String>,
-    /// Recent unique messages, oldest first.
-    pub banner: Vec<String>,
-    pub settings: Settings,
-    settings_view: settings_view::SettingsView,
-    account: account::Account,
-    refreshing: bool,
-    /// Bumped on sign-in and sign-out; a refresh started under an older value is stale.
-    generation: u64,
-    covers: list::Covers,
+/// Passes the app's events to the UI thread and wakes it.
+struct Forward {
     tx: Sender<Event>,
-    rx: Receiver<Event>,
+    ctx: egui::Context,
 }
 
-/// Add a message to the banner, keeping the most recent unique ones.
-pub fn add_banner(banner: &mut Vec<String>, message: String) {
-    banner.retain(|line| *line != message);
-    banner.push(message);
-    if banner.len() > BANNER_LINES {
-        banner.drain(..banner.len() - BANNER_LINES);
+impl Listener for Forward {
+    fn on_event(&self, event: Event) {
+        let _ = self.tx.send(event);
+        self.ctx.request_repaint();
     }
+}
+
+/// A view of the `leafport_app::App` state, plus the state only this UI has.
+pub struct App {
+    core: Arc<leafport_app::App>,
+    rows: Vec<Row>,
+    status: Status,
+    settings: Settings,
+    /// Download progress of syncing rows, once their download reports one.
+    progress: HashMap<String, f32>,
+    rx: Receiver<Event>,
+    /// Row whose removal awaits confirmation.
+    confirm_remove: Option<String>,
+    settings_view: settings_view::SettingsView,
+    account: account::Account,
+    covers: list::Covers,
 }
 
 /// The startup argument, when it names an ACSM file.
@@ -71,176 +51,94 @@ fn startup_acsm() -> Option<PathBuf> {
         .then_some(path)
 }
 
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut banner = Vec::new();
-        let settings = match paths::settings_path() {
-            Some(path) => Settings::load(&path).unwrap_or_else(|e| {
-                add_banner(&mut banner, format!("Could not read settings: {e}"));
-                Settings::default()
-            }),
-            None => Settings::default(),
-        };
-        cc.egui_ctx
-            .set_theme(settings_view::theme_preference(settings.theme));
-        let root = settings.books_dir_or_default().unwrap_or_default();
-        let library = if root.as_os_str().is_empty() {
-            add_banner(&mut banner, "No books folder could be determined.".into());
-            Library {
-                root,
-                local: vec![],
-            }
-        } else {
-            Library::open(&root).unwrap_or_else(|e| {
-                add_banner(
-                    &mut banner,
-                    format!("Could not open {}: {e}", root.display()),
-                );
-                Library {
-                    root,
-                    local: vec![],
-                }
-            })
-        };
-        let cloud = match paths::cache_path().map(|path| load_cache(&path)) {
-            Some(Err(e)) => {
-                add_banner(
-                    &mut banner,
-                    format!("Could not read the cloud list cache: {e}"),
-                );
-                vec![]
-            }
-            Some(Ok(cloud)) => cloud,
-            None => vec![],
-        };
-        let mut app = Self {
-            library,
-            cloud,
-            rows: vec![],
-            failures: HashMap::new(),
-            running: None,
-            progress: None,
-            cancel: None,
-            queue: VecDeque::new(),
-            returning: HashSet::new(),
-            row_errors: HashMap::new(),
-            confirm_remove: None,
-            remove_after_return: HashSet::new(),
-            banner,
-            settings,
-            settings_view: settings_view::SettingsView::default(),
-            account: account::Account::new(),
-            refreshing: false,
-            generation: 0,
-            covers: list::Covers::default(),
+        let core = leafport_app::App::new(Box::new(Forward {
             tx,
-            rx,
-        };
+            ctx: cc.egui_ctx.clone(),
+        }));
         // The cloud list is refreshed only when the user asks; until then the cache shows.
-        app.remerge();
+        let snapshot = core.snapshot();
+        cc.egui_ctx
+            .set_theme(settings_view::theme_preference(&snapshot.settings.theme));
         if let Some(path) = startup_acsm() {
-            app.enqueue_import(path, &cc.egui_ctx);
+            core.import_acsm(path_string(&path));
         }
-        app
+        Self {
+            account: account::Account::new(&snapshot.status),
+            core,
+            rows: snapshot.rows,
+            status: snapshot.status,
+            settings: snapshot.settings,
+            progress: HashMap::new(),
+            rx,
+            confirm_remove: None,
+            settings_view: settings_view::SettingsView::default(),
+            covers: list::Covers::default(),
+        }
     }
 
-    /// Rebuild `rows` from the cloud list and local folders, then overlay sync failures.
-    pub fn remerge(&mut self) {
-        self.rows = merge(&self.cloud, &self.library.local);
-        for row in &mut self.rows {
-            if let Some(message) = self.failures.get(&row.key) {
-                row.state = ItemState::Failed(message.clone());
+    /// Apply one event from the app.
+    fn apply(&mut self, event: Event) {
+        match event {
+            Event::Rows { rows } => {
+                // Read a cover again only for rows whose cover may have changed or that left.
+                for old in &self.rows {
+                    match rows.iter().find(|row| row.key == old.key) {
+                        Some(new) if !cover_changed(old, new) => {}
+                        Some(new) => {
+                            forget_cover(&mut self.covers, old);
+                            forget_cover(&mut self.covers, new);
+                        }
+                        None => forget_cover(&mut self.covers, old),
+                    }
+                }
+                self.rows = rows;
+                let rows = &self.rows;
+                self.progress
+                    .retain(|key, _| rows.iter().any(|row| row.key == *key && is_syncing(row)));
             }
-        }
-    }
-
-    fn refresh(&mut self, ctx: &egui::Context) {
-        if self.refreshing {
-            return;
-        }
-        self.refreshing = true;
-        jobs::refresh(&self.tx, ctx, paths::cache_path(), self.generation);
-    }
-
-    /// Start a new account generation: in-flight refreshes become stale and a new one may start.
-    fn new_generation(&mut self) {
-        self.generation += 1;
-        self.refreshing = false;
-    }
-
-    fn remove_cache(&mut self) {
-        if let Some(path) = paths::cache_path() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => add_banner(
-                    &mut self.banner,
-                    format!("Could not remove the cloud list cache: {e}"),
-                ),
+            Event::Row { row } => {
+                let Some(slot) = self.rows.iter_mut().find(|old| old.key == row.key) else {
+                    return;
+                };
+                // A row with a new cover file or folder has its cover read again.
+                if cover_changed(slot, &row) {
+                    forget_cover(&mut self.covers, slot);
+                    forget_cover(&mut self.covers, &row);
+                }
+                if !is_syncing(&row) {
+                    self.progress.remove(&row.key);
+                }
+                *slot = row;
             }
-        }
-    }
-
-    /// Re-read the books folder without sweeping temp folders, so a running sync is safe.
-    fn rescan(&mut self) {
-        match Library::rescan(&self.library.root) {
-            Ok(library) => self.library = library,
-            Err(e) => add_banner(
-                &mut self.banner,
-                format!("Could not read the books folder: {e}"),
-            ),
-        }
-        self.remerge();
-    }
-
-    /// Start returning the loan of the row with `key`, unless a return already runs.
-    fn start_return(&mut self, key: String, ctx: &egui::Context) {
-        if self.returning.contains(&key) {
-            return;
-        }
-        let Some(item) = self.rows.iter().find(|row| row.key == key).cloned() else {
-            return;
-        };
-        self.row_errors.remove(&key);
-        self.returning.insert(key);
-        jobs::return_loan(&self.tx, ctx, item);
-    }
-
-    /// Delete the title folder of the row with `key` and rescan. The book stays in the
-    /// cloud list.
-    fn remove_folder(&mut self, key: &str) {
-        let Some(folder) = self
-            .rows
-            .iter()
-            .find(|row| row.key == key)
-            .and_then(|row| row.folder.clone())
-        else {
-            return;
-        };
-        // Only a title folder directly inside the books folder is ever deleted.
-        if folder.parent() != Some(self.library.root.as_path()) {
-            add_banner(
-                &mut self.banner,
-                format!(
-                    "Not removing {}: outside the books folder",
-                    folder.display()
-                ),
-            );
-            return;
-        }
-        match std::fs::remove_dir_all(&folder) {
-            Ok(()) => {
-                self.covers.forget(&folder);
-                self.failures.remove(key);
-                self.row_errors.remove(key);
+            Event::RowRemoved { key } => {
+                if let Some(index) = self.rows.iter().position(|row| row.key == key) {
+                    let row = self.rows.remove(index);
+                    forget_cover(&mut self.covers, &row);
+                }
+                self.progress.remove(&key);
             }
-            Err(e) => add_banner(
-                &mut self.banner,
-                format!("Could not remove {}: {e}", folder.display()),
-            ),
+            Event::Progress { key, fraction } => {
+                if self
+                    .rows
+                    .iter()
+                    .any(|row| row.key == key && is_syncing(row))
+                {
+                    self.progress.insert(key, fraction);
+                }
+            }
+            Event::Status { status } => {
+                self.account.on_status(&self.status, &status);
+                self.status = status;
+            }
+            Event::Providers { result } => self.account.on_providers(result),
         }
-        self.rescan();
     }
 
     /// The confirmation dialog for `confirm_remove`. An active loan is returned first;
@@ -249,23 +147,22 @@ impl App {
         let Some(key) = self.confirm_remove.clone() else {
             return;
         };
-        let Some(item) = self.rows.iter().find(|row| row.key == key) else {
+        let Some(row) = self.rows.iter().find(|row| row.key == key) else {
             self.confirm_remove = None;
             return;
         };
-        let Some(folder) = item.folder.clone() else {
+        let Some(folder) = row.folder.clone() else {
             self.confirm_remove = None;
             return;
         };
-        let title = item.title.clone();
-        let on_loan = matches!(item.state, ItemState::OnLoan { .. })
-            || item.metadata.as_ref().is_some_and(|m| m.loan.is_some());
+        let title = row.title.clone();
+        let on_loan = row.on_loan;
         let mut confirmed = false;
         let mut cancelled = false;
         let modal = egui::Modal::new(egui::Id::unique("remove")).show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.heading(format!("Remove \"{title}\" from disk?"));
-            ui.label(format!("This deletes {}.", folder.display()));
+            ui.label(format!("This deletes {folder}."));
             ui.label("The book stays in your cloud library.");
             if on_loan {
                 ui.label(
@@ -285,89 +182,31 @@ impl App {
         });
         if confirmed {
             self.confirm_remove = None;
-            if on_loan {
-                self.remove_after_return.insert(key.clone());
-                self.start_return(key, ctx);
-            } else {
-                self.remove_folder(&key);
-            }
+            self.core.remove(key, on_loan);
         } else if cancelled || modal.should_close() {
             self.confirm_remove = None;
         }
     }
 
-    fn sign_out(&mut self) {
-        if self.account.sign_out().is_err() {
-            return;
-        }
-        self.new_generation();
-        self.remove_cache();
-        self.cloud.clear();
-        // Queued cloud rows have no ACSM once the list is gone, and old failures would
-        // mark the remaining Local rows Failed.
-        self.queue.clear();
-        self.failures.clear();
-        self.row_errors.clear();
-        self.remerge();
-    }
-
-    /// Save edited settings, apply the theme, and on a books folder change open the new folder.
+    /// Save edited settings and apply the theme. The app opens a changed books folder.
     fn apply_settings(&mut self, new: Settings, ctx: &egui::Context) {
-        match paths::settings_path() {
-            Some(path) => {
-                if let Err(e) = new.save(&path) {
-                    add_banner(&mut self.banner, format!("Could not save settings: {e}"));
-                }
+        match self.core.set_settings(new.clone()) {
+            // A failed save is already in the banner; the settings still apply.
+            Ok(()) | Err(AppError::Save { .. }) => {
+                ctx.set_theme(settings_view::theme_preference(&new.theme));
+                self.settings = new;
             }
-            None => add_banner(
-                &mut self.banner,
-                "No settings folder could be determined.".into(),
-            ),
-        }
-        ctx.set_theme(settings_view::theme_preference(new.theme));
-        let old_root = self.settings.books_dir_or_default();
-        let new_root = new.books_dir_or_default();
-        self.settings = new;
-        if new_root != old_root
-            && let Some(root) = new_root
-        {
-            self.library = Library::open(&root).unwrap_or_else(|e| {
-                add_banner(
-                    &mut self.banner,
-                    format!("Could not open {}: {e}", root.display()),
+            Err(AppError::Busy) => {
+                self.core.add_message(
+                    "The books folder can change once the running job finishes.".into(),
                 );
-                Library {
-                    root,
-                    local: vec![],
-                }
-            });
-            self.remerge();
-        }
-    }
-
-    /// Keys of the rows Sync all queues: Available or Failed, with an ACSM and no book
-    /// file on disk yet.
-    fn unsynced(&self) -> Vec<String> {
-        self.rows
-            .iter()
-            .filter(|row| matches!(row.state, ItemState::Available | ItemState::Failed(_)))
-            .filter(|row| row.publication.is_none() && row.acsm.is_some())
-            .map(|row| row.key.clone())
-            .collect()
-    }
-
-    /// Queue every book that is not on disk yet, in list order.
-    fn sync_all(&mut self, ctx: &egui::Context) {
-        for key in self.unsynced() {
-            self.enqueue(key, ctx);
+                // Nothing was saved; show the settings in effect again.
+                self.settings_view.open(&self.settings);
+            }
         }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let can_sync_all = self.account.signed_in.is_some() && !self.unsynced().is_empty();
-        let syncing =
-            self.running_cancellable() || self.queue.iter().any(|job| matches!(job, Job::Sync(_)));
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Import ACSM…").clicked()
@@ -375,24 +214,24 @@ impl App {
                         .add_filter("ACSM", &["acsm"])
                         .pick_file()
                 {
-                    self.enqueue_import(path, &ctx);
+                    self.core.import_acsm(path_string(&path));
                 }
                 if ui.button("Settings").clicked() {
                     self.settings_view.open(&self.settings);
                 }
-                if matches!(self.running, Some(Job::Import(_))) {
+                if self.status.importing {
                     ui.spinner();
                     ui.weak("Importing…");
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_enabled(can_sync_all, egui::Button::new("Sync all"))
+                        .add_enabled(self.status.can_sync_all, egui::Button::new("Sync all"))
                         .clicked()
                     {
-                        self.sync_all(&ctx);
+                        self.core.sync_all();
                     }
-                    if syncing && ui.button("Cancel all").clicked() {
-                        self.cancel_all_syncs();
+                    if self.status.can_cancel_all && ui.button("Cancel all").clicked() {
+                        self.core.cancel_all();
                     }
                 });
             });
@@ -400,7 +239,7 @@ impl App {
     }
 
     fn banner(&mut self, ui: &mut egui::Ui) {
-        if self.banner.is_empty() {
+        if self.status.banner.is_empty() {
             return;
         }
         egui::Panel::top("banner").show(ui, |ui| {
@@ -409,10 +248,12 @@ impl App {
                     .add(egui::Button::new(list::close_icon(ui)).small())
                     .clicked()
                 {
-                    self.banner.clear();
+                    // Clear at once; the app confirms with a status update.
+                    self.status.banner.clear();
+                    self.core.clear_banner();
                 }
                 ui.vertical(|ui| {
-                    for line in &self.banner {
+                    for line in &self.status.banner {
                         ui.colored_label(ui.visuals().warn_fg_color, line);
                     }
                 });
@@ -420,140 +261,57 @@ impl App {
         });
     }
 
-    fn handle(&mut self, event: Event, ctx: &egui::Context) {
-        match event {
-            Event::Vendors(result) => self.account.on_vendors(result),
-            Event::SignIn(result) => {
-                if self.account.on_sign_in(result) {
-                    self.new_generation();
-                }
-            }
-            Event::Refreshed { generation, .. }
-                if generation != self.generation || self.account.signed_in.is_none() =>
-            {
-                // Started before a sign-in or sign-out: it may have rewritten the cache
-                // after sign-out removed it. Drop it; the user refreshes again if wanted.
-                self.remove_cache();
-            }
-            Event::Refreshed { result, .. } => {
-                self.refreshing = false;
-                match result {
-                    Ok(cloud) => {
-                        self.cloud = cloud;
-                        self.remerge();
-                    }
-                    Err(e) => add_banner(&mut self.banner, format!("Refresh failed: {e}")),
-                }
-            }
-            Event::Progress { key, fraction } => {
-                if matches!(&self.running, Some(Job::Sync(running)) if *running == key) {
-                    self.progress = Some(fraction);
-                }
-            }
-            Event::Synced { key, result } => {
-                self.running = None;
-                self.progress = None;
-                let cancelled = self.cancel.take().is_some_and(|token| token.is_cancelled());
-                match result {
-                    Ok(outcome) => {
-                        self.failures.remove(&key);
-                        self.covers.forget(&outcome.folder);
-                        if let Some(warning) = outcome.warning {
-                            add_banner(&mut self.banner, warning);
-                        }
-                    }
-                    // A cancelled sync leaves the row as it was, not Failed.
-                    Err(_) if cancelled => {}
-                    Err(e) => {
-                        self.failures.insert(key, e);
-                    }
-                }
-                self.rescan();
-                self.start_next_sync(ctx);
-            }
-            Event::Imported(result) => {
-                self.running = None;
-                match result {
-                    Ok(outcome) => {
-                        self.failures.remove(&outcome.metadata.resource);
-                        self.covers.forget(&outcome.folder);
-                        if let Some(warning) = outcome.warning {
-                            add_banner(&mut self.banner, warning);
-                        }
-                    }
-                    Err(e) => add_banner(&mut self.banner, format!("Import failed: {e}")),
-                }
-                self.rescan();
-                self.start_next_sync(ctx);
-            }
-            Event::Returned { key, result } => {
-                self.returning.remove(&key);
-                let remove = self.remove_after_return.remove(&key);
-                match result {
-                    Ok(_) if remove => self.remove_folder(&key),
-                    Ok(_) => {
-                        self.row_errors.remove(&key);
-                        let folder = self.rows.iter().find(|row| row.key == key);
-                        if let Some(folder) = folder.and_then(|row| row.folder.as_deref()) {
-                            self.covers.forget(folder);
-                        }
-                    }
-                    Err(e) => {
-                        self.row_errors.insert(key, e);
-                    }
-                }
-                self.rescan();
-            }
-            Event::Cover { path, image } => self.covers.insert(ctx, path, image),
-        }
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         egui::Panel::left("account")
             .default_size(220.0)
             .show(ui, |ui| {
                 ui.heading("Leafport");
                 ui.separator();
-                match self.account.signed_in.clone() {
+                match self.status.user.clone() {
                     Some(user) => {
                         ui.label("Signed in as");
                         ui.strong(user);
                         if ui.button("Sign out").clicked() {
-                            self.sign_out();
+                            self.core.sign_out();
                         }
                     }
                     None => {
                         ui.label("Not signed in");
                         if ui.button("Sign in").clicked() {
-                            self.account.open_window(&self.tx, &ctx);
+                            self.account.open_window(&self.core);
                         }
                     }
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let enabled = self.account.signed_in.is_some() && !self.refreshing;
+                    let enabled = self.status.user.is_some() && !self.status.refreshing;
                     if ui
                         .add_enabled(enabled, egui::Button::new("Refresh list"))
                         .clicked()
                     {
-                        self.refresh(&ctx);
+                        self.core.refresh();
                     }
-                    if self.refreshing {
+                    if self.status.refreshing {
                         ui.spinner();
                     }
                 });
-                if !self.account.status.is_empty() {
-                    ui.weak(&self.account.status);
+                let note = self.account.note(&self.status);
+                if !note.is_empty() {
+                    ui.weak(note);
                 }
             });
     }
 }
 
+fn is_syncing(row: &Row) -> bool {
+    matches!(row.activity, Activity::Syncing { .. })
+}
+
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.covers.receive(ctx);
         while let Ok(event) = self.rx.try_recv() {
-            self.handle(event, ctx);
+            self.apply(event);
         }
     }
 
@@ -564,50 +322,56 @@ impl eframe::App for App {
         self.sidebar(ui);
         let mut clicked = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            if self.account.signed_in.is_none() {
+            if self.status.user.is_none() {
                 ui.horizontal(|ui| {
                     ui.label("Sign in to see the books in your account.");
                     if ui.button("Sign in").clicked() {
-                        self.account.open_window(&self.tx, &ctx);
+                        self.account.open_window(&self.core);
                     }
                 });
                 ui.separator();
             }
-            let busy = list::Busy {
-                running: self.running.as_ref(),
-                progress: self.progress,
-                cancellable: self.running_cancellable(),
-                queue: &self.queue,
-                returning: &self.returning,
-                row_errors: &self.row_errors,
-            };
-            clicked = list::show(ui, &self.rows, busy, &mut self.covers, &self.tx);
+            clicked = list::show(ui, &self.rows, &self.progress, &mut self.covers);
         });
         match clicked {
-            Some(list::Action::Sync(key)) => self.enqueue(key, &ctx),
-            Some(list::Action::Return(key)) => self.start_return(key, &ctx),
+            Some(list::Action::Sync(key)) => self.core.sync(key),
+            Some(list::Action::Return(key)) => self.core.return_loan(key),
             Some(list::Action::Open(path) | list::Action::ShowInFolder(path)) => {
                 if let Err(e) = list::open_path(&path) {
-                    add_banner(
-                        &mut self.banner,
-                        format!("Could not open {}: {e}", path.display()),
-                    );
+                    self.core
+                        .add_message(format!("Could not open {}: {e}", path.display()));
                 }
             }
             Some(list::Action::Remove(key)) => self.confirm_remove = Some(key),
-            Some(list::Action::Cancel(key)) => self.cancel_sync(&key),
+            Some(list::Action::Cancel(key)) => self.core.cancel(key),
             None => {}
         }
         self.remove_dialog(&ctx);
         if self.account.open {
-            self.account.window(&self.tx, &ctx);
+            self.account.window(&self.core, &self.status, &ctx);
         }
         if self.settings_view.open {
-            let busy = self.running.is_some();
-            if let Some(new) = self.settings_view.window(&ctx, &self.settings, busy) {
+            let busy = self.status.job_running;
+            let books_dir = self.status.books_dir.clone();
+            if let Some(new) =
+                self.settings_view
+                    .window(&ctx, &self.settings, books_dir.as_deref(), busy)
+            {
                 self.apply_settings(new, &ctx);
             }
         }
+    }
+}
+
+/// Whether `new` may show a different cover than `old`.
+fn cover_changed(old: &Row, new: &Row) -> bool {
+    old.cover_path != new.cover_path || old.folder != new.folder
+}
+
+/// Drop the cached cover textures of `row`, so they are read again.
+fn forget_cover(covers: &mut list::Covers, row: &Row) {
+    for path in [&row.folder, &row.cover_path].into_iter().flatten() {
+        covers.forget(Path::new(path));
     }
 }
 

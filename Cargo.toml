@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/leafport-app",
     "crates/leafport-core",
     "crates/leafport-cli",
     "crates/leafport-desktop",

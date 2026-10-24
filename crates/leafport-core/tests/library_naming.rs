@@ -32,6 +32,8 @@ fn folder_name_handles_hostile_titles() {
     assert_eq!(folder_name("Com10"), "Com10");
     assert_eq!(folder_name(".hack//Sign"), "hackSign");
     assert_eq!(folder_name("Ends with dot."), "Ends with dot");
+    // C0 and C1 control characters are dropped alike.
+    assert_eq!(folder_name("A\u{1b}B\u{80}C\u{9f}D\u{7f}"), "ABCD");
     let long = folder_name(&"é".repeat(400));
     assert!(long.len() <= 200 && long.chars().all(|c| c == 'é'));
 }

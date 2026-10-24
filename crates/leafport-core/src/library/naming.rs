@@ -4,9 +4,7 @@ const MAX_NAME_BYTES: usize = 200;
 const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
 
 fn is_dropped(c: char) -> bool {
-    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-        || ('\u{0}'..='\u{1f}').contains(&c)
-        || c == '\u{7f}'
+    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control()
 }
 
 fn is_reserved(name: &str) -> bool {

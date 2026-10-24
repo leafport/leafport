@@ -270,7 +270,10 @@ impl CredentialStore for FailingStore {
         self.inner.save(account, secret)
     }
     fn delete(&self, account: &str) -> Result<(), StoreError> {
-        self.write()?;
+        // Deleting an absent entry changes nothing, so it is not a write that can crash.
+        if self.inner.load(account)?.is_some() {
+            self.write()?;
+        }
         self.inner.delete(account)
     }
 }

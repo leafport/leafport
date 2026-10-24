@@ -316,7 +316,13 @@ pub fn return_loan(
     let mut returned = metadata.clone();
     returned.loan = None;
     returned.returned = true;
-    returned.write(folder)?;
+    // The operator has the book back; returning again would only be refused.
+    returned.write(folder).map_err(|e| {
+        std::io::Error::other(format!(
+            "the loan was returned, but {} could not be updated: {e}",
+            folder.join(super::METADATA_FILE).display()
+        ))
+    })?;
     Ok(returned)
 }
 

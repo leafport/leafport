@@ -323,8 +323,10 @@ pub fn parse_sign_in_response(xml: &str) -> Result<SignInResult, SignInResponseE
         .descendants()
         .find(|node| node.has_tag_name((ADEPT_NS, "user")))
         .and_then(|node| node.text())
-        .map(str::to_owned)
+        // Trimmed like the activationToken fields it is later compared with.
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_owned)
         .ok_or(SignInResponseError::MissingUser)?;
     // Retain the response bytes as the credential record. Byte-faithful retention
     // keeps every returned credential without imposing a schema on it.

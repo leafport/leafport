@@ -138,6 +138,18 @@ fn sign_in_response_returns_user_and_retains_credentials() {
 }
 
 #[test]
+fn sign_in_response_user_is_trimmed() {
+    let xml = "<credentials xmlns=\"http://ns.adobe.com/adept\"><user>\n  urn:uuid:me\n</user></credentials>";
+    assert_eq!(parse_sign_in_response(xml).unwrap().user, "urn:uuid:me");
+    assert!(matches!(
+        parse_sign_in_response(
+            "<credentials xmlns=\"http://ns.adobe.com/adept\"><user> </user></credentials>"
+        ),
+        Err(SignInResponseError::MissingUser)
+    ));
+}
+
+#[test]
 fn sign_in_response_errors() {
     assert!(matches!(
         parse_sign_in_response(r#"<error xmlns="http://ns.adobe.com/adept" data="E_AUTH"/>"#),
