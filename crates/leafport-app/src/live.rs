@@ -1,12 +1,15 @@
 //! The real side effects: the network, the OS credential store and the activation lock.
 
 use std::path::Path;
+use std::time::Duration;
 
 use leafport_core::activation::{self, ActivationKeys};
 use leafport_core::cloud::DownloadRecord;
 use leafport_core::library::{self, Item, Library, Metadata, SyncOutcome};
 use leafport_core::service::{AdeptResponse, CancelToken, ServiceClient, ServiceError, Transport};
-use leafport_core::store::{ActivationState, CredentialStore, DEFAULT_ACCOUNT, KeyringStore};
+use leafport_core::store::{
+    ActivationState, CredentialStore, DEFAULT_ACCOUNT, KeyringStore, StoreError,
+};
 use leafport_core::vendors::VendorCatalog;
 
 use crate::ops::{Ops, SyncHooks};
@@ -132,10 +135,18 @@ impl Ops for LiveOps {
         // signing in. Fulfillment requires the server-issued device,
         // and only sign-in activates: if this fails, the sign-in fails and nothing
         // new is saved, so the user signs in again.
-        activation::ensure_device_activation(&client, &mut state).map_err(|e| e.to_string())?;
-        state
-            .save(&KeyringStore::new(), DEFAULT_ACCOUNT)
-            .map_err(|e| e.to_string())?;
+        let activated =
+            activation::ensure_device_activation(&client, &mut state).map_err(|e| e.to_string())?;
+        save_retrying(&state, &KeyringStore::new(), &SAVE_RETRY_DELAYS).map_err(|e| {
+            if activated {
+                format!(
+                    "this device was activated, but saving the activation failed: {e}. \
+                     Signing in again uses another of the account's device slots."
+                )
+            } else {
+                e.to_string()
+            }
+        })?;
         Ok(signed.user)
     }
 
@@ -206,6 +217,29 @@ fn load_activation() -> Result<ActivationState, String> {
     ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "not signed in".to_string())
+}
+
+/// Pauses before the second and the third attempt to save a signed-in activation. A new
+/// device activation uses one of the account's device slots, so a failed save is not
+/// given up at once.
+const SAVE_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(2)];
+
+/// Save `state` to `store`, trying again after each of `delays` while it fails.
+/// Returns the last error.
+fn save_retrying(
+    state: &ActivationState,
+    store: &dyn CredentialStore,
+    delays: &[Duration],
+) -> Result<(), StoreError> {
+    let mut result = state.save(store, DEFAULT_ACCOUNT);
+    for delay in delays {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(*delay);
+        result = state.save(store, DEFAULT_ACCOUNT);
+    }
+    result
 }
 
 /// A transport whose book downloads report their progress; everything else is the
@@ -308,4 +342,90 @@ fn machine_fingerprint(device_key: &[u8; 16]) -> String {
     hasher.update(b"\0");
     hasher.update(user.as_bytes());
     STANDARD.encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A store whose first `failures` saves fail.
+    struct FlakyStore {
+        failures: Mutex<usize>,
+        saves: Mutex<usize>,
+    }
+
+    impl FlakyStore {
+        fn new(failures: usize) -> Self {
+            Self {
+                failures: Mutex::new(failures),
+                saves: Mutex::new(0),
+            }
+        }
+
+        fn saves(&self) -> usize {
+            *self.saves.lock().unwrap()
+        }
+    }
+
+    impl CredentialStore for FlakyStore {
+        fn load(&self, _: &str) -> Result<Option<Vec<u8>>, StoreError> {
+            Ok(None)
+        }
+
+        fn save(&self, _: &str, _: &[u8]) -> Result<(), StoreError> {
+            *self.saves.lock().unwrap() += 1;
+            let mut failures = self.failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(StoreError::Corrupt("locked"));
+            }
+            Ok(())
+        }
+
+        fn delete(&self, _: &str) -> Result<(), StoreError> {
+            Ok(())
+        }
+    }
+
+    fn state() -> ActivationState {
+        let device_key = [7; 16];
+        ActivationState {
+            device_key,
+            keys: ActivationKeys::generate().unwrap(),
+            user: "urn:uuid:user".into(),
+            device: activation::device_id(&device_key),
+            fingerprint: activation::device_fingerprint(&device_key),
+            credentials_xml: String::new(),
+            activation_token_xml: None,
+            operator_urls: Vec::new(),
+        }
+    }
+
+    const NO_WAIT: [Duration; 2] = [Duration::ZERO; 2];
+
+    #[test]
+    fn save_retry_waits_before_the_second_and_third_attempt() {
+        assert_eq!(SAVE_RETRY_DELAYS.len(), 2);
+        assert!(SAVE_RETRY_DELAYS[0] > Duration::ZERO);
+        assert!(SAVE_RETRY_DELAYS[1] > SAVE_RETRY_DELAYS[0]);
+    }
+
+    #[test]
+    fn save_retry_stops_at_the_first_success() {
+        let state = state();
+        let store = FlakyStore::new(0);
+        save_retrying(&state, &store, &NO_WAIT).unwrap();
+        assert_eq!(store.saves(), 1);
+        let store = FlakyStore::new(2);
+        save_retrying(&state, &store, &NO_WAIT).unwrap();
+        assert_eq!(store.saves(), 3);
+    }
+
+    #[test]
+    fn save_retry_gives_up_after_three_attempts() {
+        let store = FlakyStore::new(usize::MAX);
+        assert!(save_retrying(&state(), &store, &NO_WAIT).is_err());
+        assert_eq!(store.saves(), 3);
+    }
 }
