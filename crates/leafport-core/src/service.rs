@@ -19,6 +19,8 @@ pub enum ServiceError {
         host: String,
     },
     Http(reqwest::Error),
+    /// A non-success HTTP status where the body carries nothing to report.
+    Status(reqwest::StatusCode),
     Read(std::io::Error),
     Utf8(std::string::FromUtf8Error),
     Vendor(VendorError),
@@ -34,6 +36,7 @@ impl fmt::Display for ServiceError {
                 "{host} is limiting requests from this network (HTTP 429). Try again later."
             ),
             Self::Http(error) => write!(f, "service request failed: {error}"),
+            Self::Status(status) => write!(f, "service request failed: HTTP {status}"),
             Self::Read(error) => write!(f, "service response read failed: {error}"),
             Self::Utf8(error) => write!(f, "service response is not UTF-8: {error}"),
             Self::Vendor(error) => error.fmt(f),
@@ -45,12 +48,15 @@ impl Error for ServiceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         if matches!(
             self,
-            Self::ResponseTooLarge | Self::Cancelled | Self::RateLimited { .. }
+            Self::ResponseTooLarge | Self::Cancelled | Self::RateLimited { .. } | Self::Status(_)
         ) {
             return None;
         }
         Some(match self {
-            Self::ResponseTooLarge | Self::Cancelled | Self::RateLimited { .. } => unreachable!(),
+            Self::ResponseTooLarge
+            | Self::Cancelled
+            | Self::RateLimited { .. }
+            | Self::Status(_) => unreachable!(),
             Self::Http(error) => error,
             Self::Read(error) => error,
             Self::Utf8(error) => error,
@@ -278,23 +284,19 @@ impl ServiceClient {
         Ok(Self { http, cancel: None })
     }
 
-    /// Blocking operation: desktop callers must run this off the UI thread.
+    /// Blocking operation: desktop callers must run this off the UI thread. Goes through
+    /// `fetch`, so a 429 is `RateLimited` and a cancelled client sends nothing.
     pub fn load_vendors(&self, catalog: &mut VendorCatalog) -> Result<(), ServiceError> {
         let response = self
-            .http
-            .get(AUTHENTICATION_SERVICE_INFO)
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(ServiceError::Http)?;
-        let mut bytes = Vec::new();
-        response
-            .take(MAX_SERVICE_INFO_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(ServiceError::Read)?;
-        if bytes.len() > MAX_SERVICE_INFO_BYTES {
-            return Err(ServiceError::Vendor(VendorError::InputTooLarge));
+            .fetch(AUTHENTICATION_SERVICE_INFO, MAX_SERVICE_INFO_BYTES)
+            .map_err(|error| match error {
+                ServiceError::ResponseTooLarge => ServiceError::Vendor(VendorError::InputTooLarge),
+                error => error,
+            })?;
+        if !response.status.is_success() {
+            return Err(ServiceError::Status(response.status));
         }
-        let xml = String::from_utf8(bytes).map_err(ServiceError::Utf8)?;
+        let xml = String::from_utf8(response.body).map_err(ServiceError::Utf8)?;
         catalog
             .apply_service_info(&xml)
             .map_err(ServiceError::Vendor)
@@ -433,6 +435,17 @@ mod tests {
             client.post_adept(url, String::new()),
             Err(ServiceError::Cancelled)
         ));
+    }
+
+    #[test]
+    fn a_cancelled_client_loads_no_vendors() {
+        let client = ServiceClient::new().unwrap().with_cancel(cancelled_flag());
+        let mut catalog = VendorCatalog::new();
+        assert!(matches!(
+            client.load_vendors(&mut catalog),
+            Err(ServiceError::Cancelled)
+        ));
+        assert!(!catalog.is_loaded());
     }
 
     #[test]
