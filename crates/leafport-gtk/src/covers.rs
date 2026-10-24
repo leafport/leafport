@@ -1,6 +1,6 @@
 //! Cover thumbnails: decoded off the main thread, cached by path.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::{Rc, Weak};
@@ -9,10 +9,18 @@ use gtk::{gdk, gio, glib};
 
 type ReadyFn = Box<dyn Fn(&str)>;
 
-/// Cover textures by file path. A path is decoded once; `None` means loading or
-/// unreadable.
+/// One cached path: the decode that fills it and its texture, `None` while loading or
+/// when unreadable.
+struct Slot {
+    generation: u64,
+    texture: Option<gdk::Texture>,
+}
+
+/// Cover textures by file path. A path is decoded once until it is forgotten.
 pub struct Covers {
-    textures: RefCell<HashMap<String, Option<gdk::Texture>>>,
+    textures: RefCell<HashMap<String, Slot>>,
+    /// The generation of the next decode.
+    next: Cell<u64>,
     ready: RefCell<Vec<ReadyFn>>,
     this: Weak<Covers>,
 }
@@ -22,6 +30,7 @@ impl Covers {
     pub fn new() -> Rc<Covers> {
         Rc::new_cyclic(|this| Covers {
             textures: RefCell::default(),
+            next: Cell::new(0),
             ready: RefCell::default(),
             this: this.clone(),
         })
@@ -30,10 +39,18 @@ impl Covers {
     /// The cached texture of `path`, or `None`. A path never seen is decoded on a
     /// worker thread; once it is there, the `connect_ready` handlers get `path`.
     pub fn get(&self, path: &str) -> Option<gdk::Texture> {
-        if let Some(texture) = self.textures.borrow().get(path) {
-            return texture.clone();
+        if let Some(slot) = self.textures.borrow().get(path) {
+            return slot.texture.clone();
         }
-        self.textures.borrow_mut().insert(path.to_owned(), None);
+        let generation = self.next.get();
+        self.next.set(generation.wrapping_add(1));
+        self.textures.borrow_mut().insert(
+            path.to_owned(),
+            Slot {
+                generation,
+                texture: None,
+            },
+        );
         let this = self.this.clone();
         let path = path.to_owned();
         glib::spawn_future_local(async move {
@@ -45,20 +62,30 @@ impl Covers {
             let (Some(this), Some(texture)) = (this.upgrade(), texture) else {
                 return;
             };
-            // A path forgotten while it was decoded stays forgotten; the next `get`
-            // reads it again.
-            match this.textures.borrow_mut().get_mut(&path) {
-                Some(slot @ None) => *slot = Some(texture),
-                _ => return,
-            }
-            for ready in this.ready.borrow().iter() {
-                ready(&path);
+            if this.fill(&path, generation, texture) {
+                for ready in this.ready.borrow().iter() {
+                    ready(&path);
+                }
             }
         });
         None
     }
 
-    /// Drop every cached path equal to or inside one of `paths`, so it is read again.
+    /// Store the texture of decode `generation` of `path`. Returns false, storing
+    /// nothing, when `path` was forgotten since: a later `get` started a new decode, so
+    /// this one may have read an older file.
+    fn fill(&self, path: &str, generation: u64, texture: gdk::Texture) -> bool {
+        match self.textures.borrow_mut().get_mut(path) {
+            Some(slot) if slot.generation == generation && slot.texture.is_none() => {
+                slot.texture = Some(texture);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop every cached path equal to or inside one of `paths`. The next `get` of such a
+    /// path decodes it again; a decode still running for it is discarded.
     pub fn forget(&self, paths: &[String]) {
         self.textures
             .borrow_mut()
@@ -72,11 +99,23 @@ impl Covers {
 
     #[cfg(test)]
     fn insert_pending(&self, path: &str) {
-        self.textures.borrow_mut().insert(path.to_owned(), None);
+        self.textures.borrow_mut().insert(
+            path.to_owned(),
+            Slot {
+                generation: u64::MAX,
+                texture: None,
+            },
+        );
     }
 
     #[cfg(test)]
-    fn keys(&self) -> Vec<String> {
+    fn generation(&self, path: &str) -> Option<u64> {
+        self.textures.borrow().get(path).map(|slot| slot.generation)
+    }
+
+    /// The cached paths, sorted.
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self.textures.borrow().keys().cloned().collect();
         keys.sort();
         keys
@@ -118,5 +157,37 @@ mod tests {
         covers.insert_pending("/b/t2/cover.jpg");
         covers.forget(&["/b/t1".to_owned()]);
         assert_eq!(covers.keys(), ["/b/t2/cover.jpg"]);
+    }
+
+    fn texture() -> gdk::Texture {
+        gdk::MemoryTexture::new(
+            1,
+            1,
+            gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_static(&[0, 0, 0, 255]),
+            4,
+        )
+        .into()
+    }
+
+    #[test]
+    fn decode_started_before_forget_does_not_fill_new_request() {
+        // The spawned decodes never run: this context is not iterated.
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let covers = Covers::new();
+                let path = "/b/t/cover.jpg";
+                assert!(covers.get(path).is_none());
+                let stale = covers.generation(path).unwrap();
+                covers.forget(&["/b/t".to_owned()]);
+                assert!(covers.get(path).is_none());
+                let current = covers.generation(path).unwrap();
+                assert!(!covers.fill(path, stale, texture()));
+                assert!(covers.get(path).is_none());
+                assert!(covers.fill(path, current, texture()));
+                assert!(covers.get(path).is_some());
+            })
+            .unwrap();
     }
 }

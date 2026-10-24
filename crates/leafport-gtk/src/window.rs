@@ -282,7 +282,7 @@ impl Window {
         }
         this.window
             .insert_action_group("row", Some(&row_menu::action_group(&this)));
-        this.store.set_rows(snapshot.rows);
+        this.store.set_rows(snapshot.rows, &this.covers);
         this.apply_status(&snapshot.status);
         this
     }
@@ -294,10 +294,10 @@ impl Window {
 
     /// Apply one event from the app.
     pub fn apply(&self, event: Event) {
-        let stale = match event {
-            Event::Rows { rows } => self.store.set_rows(rows),
-            Event::Row { row } => self.store.set_row(row),
-            Event::RowRemoved { key } => self.store.remove(&key),
+        match event {
+            Event::Rows { rows } => self.store.set_rows(rows, &self.covers),
+            Event::Row { row } => self.store.set_row(row, &self.covers),
+            Event::RowRemoved { key } => self.store.remove(&key, &self.covers),
             Event::Progress { key, fraction } => {
                 self.store.progress(&key, fraction);
                 return;
@@ -322,8 +322,7 @@ impl Window {
                 self.update_dialog();
                 return;
             }
-        };
-        self.covers.forget(&stale);
+        }
         self.update_body();
     }
 

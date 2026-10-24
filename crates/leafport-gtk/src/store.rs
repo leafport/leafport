@@ -8,6 +8,8 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use leafport_app::{Activity, Row};
 
+use crate::covers::Covers;
+
 mod imp {
     use std::cell::{Cell, RefCell};
 
@@ -127,15 +129,17 @@ impl RowStore {
     }
 
     /// Replace the list. Keeps the `RowObject` of every key that stays and calls
-    /// `set_row` on it when its row changed; returns the cover paths to forget (see
-    /// `stale_cover_paths`).
-    pub fn set_rows(&self, rows: Vec<Row>) -> Vec<String> {
+    /// `set_row` on it when its row changed. Stale cover paths (see `stale_cover_paths`)
+    /// are forgotten in `covers` before any object changes, so a widget that rebinds
+    /// requests the new cover after the old one is gone.
+    pub fn set_rows(&self, rows: Vec<Row>, covers: &Covers) {
         let mut old: HashMap<String, RowObject> = self
             .objects()
             .into_iter()
             .map(|object| (object.key(), object))
             .collect();
         let mut stale = Vec::new();
+        let mut changed = Vec::new();
         let mut objects = Vec::with_capacity(rows.len());
         for row in rows {
             match old.remove(&row.key) {
@@ -143,7 +147,7 @@ impl RowStore {
                     let before = object.row();
                     if before != row {
                         stale.extend(stale_cover_paths(&before, Some(&row)));
-                        object.set_row(row);
+                        changed.push((object.clone(), row));
                     }
                     objects.push(object);
                 }
@@ -153,42 +157,41 @@ impl RowStore {
         for object in old.values() {
             stale.extend(stale_cover_paths(&object.row(), None));
         }
+        covers.forget(&stale);
+        for (object, row) in changed {
+            object.set_row(row);
+        }
         self.model.splice(0, self.model.n_items(), &objects);
-        stale
     }
 
-    /// Replace one row; unknown keys are ignored. Returns cover paths to forget.
-    pub fn set_row(&self, row: Row) -> Vec<String> {
+    /// Replace one row; unknown keys are ignored. Stale cover paths are forgotten in
+    /// `covers` first, as in `set_rows`.
+    pub fn set_row(&self, row: Row, covers: &Covers) {
         let Some(object) = self.find(&row.key) else {
-            return Vec::new();
+            return;
         };
         let before = object.row();
         if before == row {
-            return Vec::new();
+            return;
         }
-        let stale = stale_cover_paths(&before, Some(&row));
+        covers.forget(&stale_cover_paths(&before, Some(&row)));
         object.set_row(row);
-        stale
     }
 
-    /// Remove one row. Returns cover paths to forget.
-    pub fn remove(&self, key: &str) -> Vec<String> {
+    /// Remove one row, forgetting its cover paths in `covers` first.
+    pub fn remove(&self, key: &str, covers: &Covers) {
         let Some(position) = (0..self.model.n_items()).find(|&i| {
             self.model
                 .item(i)
                 .and_downcast::<RowObject>()
                 .is_some_and(|object| object.key() == key)
         }) else {
-            return Vec::new();
+            return;
         };
-        let stale = self
-            .model
-            .item(position)
-            .and_downcast::<RowObject>()
-            .map(|object| stale_cover_paths(&object.row(), None))
-            .unwrap_or_default();
+        if let Some(object) = self.model.item(position).and_downcast::<RowObject>() {
+            covers.forget(&stale_cover_paths(&object.row(), None));
+        }
         self.model.remove(position);
-        stale
     }
 
     /// Record progress of a syncing row; ignored otherwise.
@@ -265,9 +268,15 @@ mod tests {
     #[test]
     fn set_rows_keeps_objects_of_kept_keys() {
         let store = RowStore::new();
-        store.set_rows(vec![row("a", Activity::Idle), row("b", Activity::Idle)]);
+        store.set_rows(
+            vec![row("a", Activity::Idle), row("b", Activity::Idle)],
+            &Covers::new(),
+        );
         let obj = store.find("a").unwrap();
-        store.set_rows(vec![row("b", Activity::Idle), row("a", Activity::Idle)]);
+        store.set_rows(
+            vec![row("b", Activity::Idle), row("a", Activity::Idle)],
+            &Covers::new(),
+        );
         assert_eq!(store.find("a").unwrap(), obj);
         assert_eq!(keys(&store), ["b", "a"]);
     }
@@ -275,8 +284,11 @@ mod tests {
     #[test]
     fn set_rows_drops_left_rows() {
         let store = RowStore::new();
-        store.set_rows(vec![row("a", Activity::Idle), row("b", Activity::Idle)]);
-        store.set_rows(vec![row("b", Activity::Idle)]);
+        store.set_rows(
+            vec![row("a", Activity::Idle), row("b", Activity::Idle)],
+            &Covers::new(),
+        );
+        store.set_rows(vec![row("b", Activity::Idle)], &Covers::new());
         assert!(store.find("a").is_none());
         assert_eq!(store.model().n_items(), 1);
     }
@@ -285,10 +297,10 @@ mod tests {
     fn set_rows_clears_progress_of_rows_that_stop_syncing() {
         let store = RowStore::new();
         let syncing = Activity::Syncing { cancellable: true };
-        store.set_rows(vec![row("a", syncing)]);
+        store.set_rows(vec![row("a", syncing)], &Covers::new());
         store.progress("a", 0.5);
         assert_eq!(store.find("a").unwrap().progress(), Some(0.5));
-        store.set_rows(vec![row("a", Activity::Idle)]);
+        store.set_rows(vec![row("a", Activity::Idle)], &Covers::new());
         assert_eq!(store.find("a").unwrap().progress(), None);
     }
 
@@ -296,9 +308,9 @@ mod tests {
     fn set_rows_keeps_progress_of_rows_still_syncing() {
         let store = RowStore::new();
         let syncing = Activity::Syncing { cancellable: true };
-        store.set_rows(vec![row("a", syncing.clone())]);
+        store.set_rows(vec![row("a", syncing.clone())], &Covers::new());
         store.progress("a", 0.5);
-        store.set_rows(vec![row("a", syncing)]);
+        store.set_rows(vec![row("a", syncing)], &Covers::new());
         assert_eq!(store.find("a").unwrap().progress(), Some(0.5));
     }
 
@@ -306,7 +318,7 @@ mod tests {
     fn progress_ignores_unknown_and_idle_rows() {
         let store = RowStore::new();
         store.progress("x", 0.3);
-        store.set_rows(vec![row("a", Activity::Idle)]);
+        store.set_rows(vec![row("a", Activity::Idle)], &Covers::new());
         store.progress("a", 0.3);
         assert_eq!(store.find("a").unwrap().progress(), None);
     }
@@ -314,8 +326,8 @@ mod tests {
     #[test]
     fn set_row_ignores_unknown_key() {
         let store = RowStore::new();
-        store.set_rows(vec![row("a", Activity::Idle)]);
-        store.set_row(row("b", Activity::Idle));
+        store.set_rows(vec![row("a", Activity::Idle)], &Covers::new());
+        store.set_row(row("b", Activity::Idle), &Covers::new());
         assert_eq!(store.model().n_items(), 1);
         assert!(store.find("b").is_none());
     }
@@ -323,15 +335,70 @@ mod tests {
     #[test]
     fn set_row_bumps_version() {
         let store = RowStore::new();
-        store.set_rows(vec![row("a", Activity::Idle)]);
+        store.set_rows(vec![row("a", Activity::Idle)], &Covers::new());
         let obj = store.find("a").unwrap();
         let count = std::rc::Rc::new(std::cell::Cell::new(0));
         let seen = count.clone();
         obj.connect_notify_local(Some("version"), move |_, _| seen.set(seen.get() + 1));
         let mut changed = row("a", Activity::Idle);
         changed.title = "changed".into();
-        store.set_row(changed);
+        store.set_row(changed, &Covers::new());
         assert_eq!(count.get(), 1);
+    }
+
+    /// A widget's `notify::version` handler requests the row's cover, as `RowWidget`
+    /// does; the request must survive the update that triggered it.
+    #[test]
+    fn new_cover_stays_requested_after_update() {
+        // The spawned decodes never run: this context is not iterated.
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let covers = Covers::new();
+                let store = RowStore::new();
+                store.set_rows(vec![row("a", Activity::Idle)], &covers);
+                let object = store.find("a").unwrap();
+                let requests = covers.clone();
+                object.connect_notify_local(Some("version"), move |object, _| {
+                    if let Some(path) = object.row().cover_path {
+                        requests.get(&path);
+                    }
+                });
+
+                // First sync: the cover appears.
+                let mut synced = row("a", Activity::Idle);
+                synced.folder = Some("/b/t".into());
+                synced.cover_path = Some("/b/t/c.jpg".into());
+                store.set_rows(vec![synced.clone()], &covers);
+                assert_eq!(covers.keys(), ["/b/t/c.jpg"]);
+
+                // The books folder changes.
+                let mut moved = synced.clone();
+                moved.folder = Some("/n/t".into());
+                moved.cover_path = Some("/n/t/c.jpg".into());
+                store.set_row(moved, &covers);
+                assert_eq!(covers.keys(), ["/n/t/c.jpg"]);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn remove_forgets_cover() {
+        let covers = Covers::new();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let store = RowStore::new();
+                let mut covered = row("a", Activity::Idle);
+                covered.folder = Some("/b/t".into());
+                covered.cover_path = Some("/b/t/c.jpg".into());
+                store.set_rows(vec![covered], &covers);
+                covers.get("/b/t/c.jpg");
+                store.remove("a", &covers);
+                assert!(covers.keys().is_empty());
+                assert!(store.find("a").is_none());
+            })
+            .unwrap();
     }
 
     #[test]
