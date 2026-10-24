@@ -601,7 +601,7 @@ fn row_factory(covers: &Rc<Covers>) -> gtk::SignalListItemFactory {
 fn choose_acsm(window: &adw::ApplicationWindow, core: Arc<App>) {
     let filter = gtk::FileFilter::new();
     filter.set_name(Some("ACSM"));
-    filter.add_pattern("*.acsm");
+    filter.add_suffix("acsm");
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&filter);
     let dialog = gtk::FileDialog::builder()
