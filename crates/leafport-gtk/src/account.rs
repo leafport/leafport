@@ -18,6 +18,9 @@ pub struct Account {
     /// Whether a provider load succeeded; until then opening the dialog loads them.
     pub loaded: bool,
     pub provider_status: String,
+    /// The username typed in the sign-in dialog, kept while it is closed. The password
+    /// is never kept.
+    pub username: String,
     /// Whether an account was signed in during this run, so signed out reads "Signed out.".
     was_signed_in: bool,
 }
@@ -39,6 +42,7 @@ impl Account {
             selected: 0,
             loaded: false,
             provider_status: String::new(),
+            username: String::new(),
             was_signed_in: status.user.is_some(),
         }
     }
@@ -121,6 +125,9 @@ impl SignInDialog {
             window.core().load_providers();
         }
         let dialog = Self::build();
+        dialog
+            .username
+            .set_text(&window.account().borrow().username);
         dialog.connect(window);
         dialog.update(&window.account().borrow(), &window.status());
         window.set_dialog(Some(dialog.clone()));
@@ -312,6 +319,15 @@ impl SignInDialog {
             let submit = submit.clone();
             move |_| submit()
         });
+        self.username.connect_changed(glib::clone!(
+            #[strong]
+            win,
+            move |entry| {
+                if let Some(win) = win.upgrade() {
+                    win.account().borrow_mut().username = entry.text().to_string();
+                }
+            }
+        ));
         self.username.connect_entry_activated({
             let submit = submit.clone();
             move |_| submit()
