@@ -15,6 +15,14 @@ use crate::ops::{Ops, SyncHooks};
 /// a sign-in and a sync never both register the device (each /Activate uses a slot).
 static ACTIVATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Take `ACTIVATION_LOCK`. It guards no data, so a panic that poisoned it left nothing
+/// inconsistent behind and the lock is recovered.
+fn activation_lock() -> std::sync::MutexGuard<'static, ()> {
+    ACTIVATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The operations against the real network and credential store.
 pub(crate) struct LiveOps;
 
@@ -51,9 +59,7 @@ impl Ops for LiveOps {
         // Device key and activation keys are generated locally for this device.
         // The 16-byte device key is random and persisted with the activation state.
         // Reuse an existing activation so books fulfilled under it stay readable.
-        let _guard = ACTIVATION_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = activation_lock();
         let existing = match ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT) {
             Ok(existing) => existing,
             Err(e) => {
@@ -134,6 +140,9 @@ impl Ops for LiveOps {
     }
 
     fn sign_out(&self) -> Result<(), String> {
+        // A worker saving its operator setup holds the lock from its account check to
+        // its save, so the deletion cannot land in between and be undone.
+        let _guard = activation_lock();
         KeyringStore::new()
             .delete(DEFAULT_ACCOUNT)
             .map_err(|e| e.to_string())
@@ -234,9 +243,7 @@ fn with_fulfillment_activation<T>(
     cancel: Option<CancelToken>,
     work: impl FnOnce(&mut ActivationState, &ServiceClient) -> Result<T, String>,
 ) -> Result<T, String> {
-    let registration = ACTIVATION_LOCK
-        .lock()
-        .map_err(|_| "device activation lock is unavailable".to_string())?;
+    let registration = activation_lock();
     let mut state = load_activation()?;
     let user = state.user.clone();
     let device_key = state.device_key;
@@ -268,9 +275,7 @@ fn with_fulfillment_activation<T>(
     let operators = state.operator_urls.clone();
     let result = work(&mut state, &client);
     if state.operator_urls != operators {
-        let _registration = ACTIVATION_LOCK
-            .lock()
-            .map_err(|_| "device activation lock is unavailable".to_string())?;
+        let _registration = activation_lock();
         // Sign-out or a replacement sign-in must not be undone by a late worker.
         if account_is_current()
             && let Err(error) = state.save(&store, DEFAULT_ACCOUNT)
