@@ -16,6 +16,9 @@ use crate::store::RowObject;
 const ROW_HEIGHT: i32 = 72;
 /// Wide enough for every primary button label, so the spinner and bar keep its size.
 const PRIMARY_WIDTH: i32 = 64;
+/// Cover size, as egui's `COVER`.
+const COVER_WIDTH: i32 = 48;
+const COVER_HEIGHT: i32 = 64;
 
 mod imp {
     use std::cell::RefCell;
@@ -99,9 +102,9 @@ impl RowWidget {
         frame.set_child(Some(&imp.placeholder));
         imp.cover.add_named(&imp.picture, Some("picture"));
         imp.cover.add_named(&frame, Some("placeholder"));
-        imp.cover.set_size_request(48, 64);
-        imp.cover.set_valign(gtk::Align::Center);
-        self.append(&imp.cover);
+        let cover = CoverBox::new(&imp.cover);
+        cover.set_valign(gtk::Align::Center);
+        self.append(&cover);
 
         imp.title.add_css_class("heading");
         let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -285,6 +288,75 @@ impl RowWidget {
                 imp.cover.set_visible_child_name("placeholder");
             }
         }
+    }
+}
+
+mod cover_imp {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    #[derive(Default)]
+    pub struct CoverBox {
+        pub child: RefCell<Option<gtk::Widget>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for CoverBox {
+        const NAME: &'static str = "LeafportCoverBox";
+        type Type = super::CoverBox;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for CoverBox {
+        fn dispose(&self) {
+            if let Some(child) = self.child.take() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl WidgetImpl for CoverBox {
+        /// The cover size, or the child's minimum when that is larger. A picture's
+        /// natural size (the 96×128 thumbnail) is ignored, so it does not grow the row.
+        fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
+            let size = match orientation {
+                gtk::Orientation::Horizontal => COVER_WIDTH,
+                _ => COVER_HEIGHT,
+            };
+            let minimum = self
+                .child
+                .borrow()
+                .as_ref()
+                .filter(|child| child.should_layout())
+                .map_or(0, |child| child.measure(orientation, -1).0);
+            let size = size.max(minimum);
+            (size, size, -1, -1)
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            if let Some(child) = self.child.borrow().as_ref()
+                && child.should_layout()
+            {
+                child.allocate(width, height, baseline, None);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    /// Holds the cover at exactly 48×64, unless its child needs more.
+    pub struct CoverBox(ObjectSubclass<cover_imp::CoverBox>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl CoverBox {
+    pub fn new(child: &impl IsA<gtk::Widget>) -> Self {
+        let this: Self = glib::Object::new();
+        child.set_parent(&this);
+        *this.imp().child.borrow_mut() = Some(child.clone().upcast());
+        this
     }
 }
 
