@@ -76,14 +76,26 @@ impl From<CloudError> for LibraryError {
     }
 }
 
-/// Writes `bytes` to `path` via a sibling temp file and rename.
+/// Writes `bytes` to `path` via a sibling temp file and rename. The temp file is flushed
+/// to disk before the rename, so a crash leaves the old or the new file, never an empty
+/// one.
 pub(crate) fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> Result<(), LibraryError> {
+    use std::io::Write;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
-    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+    let written = std::fs::File::create(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
+    }
+    // Make the rename itself durable. Best effort: not every platform can open a folder.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::File::open(parent).and_then(|dir| dir.sync_all());
     }
     Ok(())
 }
