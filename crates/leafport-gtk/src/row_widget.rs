@@ -14,8 +14,6 @@ use crate::store::RowObject;
 
 /// Row height, as egui's `ROW_HEIGHT`.
 const ROW_HEIGHT: i32 = 72;
-/// Wide enough for every primary button label, so the spinner and bar keep its size.
-const PRIMARY_WIDTH: i32 = 64;
 /// Cover size, as egui's `COVER`.
 const COVER_WIDTH: i32 = 48;
 const COVER_HEIGHT: i32 = 64;
@@ -126,10 +124,12 @@ impl RowWidget {
         imp.spinner.set_halign(gtk::Align::Center);
         imp.bar.set_valign(gtk::Align::Center);
         imp.bar.set_pulse_step(0.1);
+        imp.bar.add_css_class(PROGRESS_CLASS);
         imp.primary.add_named(&imp.button, Some("button"));
         imp.primary.add_named(&imp.spinner, Some("spinner"));
         imp.primary.add_named(&imp.bar, Some("bar"));
-        imp.primary.set_width_request(PRIMARY_WIDTH);
+        // The stack is as wide as its widest page: the button at its natural width,
+        // since the bar's trough has no minimum width (see `load_css`).
         imp.primary.set_valign(gtk::Align::Center);
         self.append(&imp.primary);
 
@@ -300,6 +300,27 @@ impl RowWidget {
             }
         }
     }
+}
+
+/// The CSS class of the row's progress bar.
+const PROGRESS_CLASS: &str = "leafport-row-progress";
+
+/// Let the row's progress bar take the button's width. Adwaita gives a horizontal
+/// trough a 150 px minimum, which would widen every row's button to 150 px.
+pub fn load_css() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    // `load_from_string` needs GTK 4.12; the minimum is 4.10.
+    provider.load_from_data(&format!(
+        "progressbar.{PROGRESS_CLASS} > trough {{ min-width: 0; }}"
+    ));
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 mod cover_imp {

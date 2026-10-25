@@ -110,6 +110,7 @@ fn main() -> glib::ExitCode {
                 .build();
             app.add_action_entries([preferences]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
+            row_widget::load_css();
         }
     ));
     app.connect_activate(glib::clone!(
