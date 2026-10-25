@@ -138,11 +138,14 @@ impl SignInDialog {
     pub fn update(&self, account: &Account, status: &Status) {
         self.updating.set(true);
         let loading = status.loading_providers;
-        self.status.set_label(if loading {
+        let provider_status = if loading {
             "Loading sign-in providers…"
         } else {
             &account.provider_status
-        });
+        };
+        self.status.set_label(provider_status);
+        // An empty label would still take its row's spacing.
+        self.status.set_visible(!provider_status.is_empty());
         self.refresh.set_sensitive(!loading);
         set_spinning(&self.refresh_spinner, loading);
 

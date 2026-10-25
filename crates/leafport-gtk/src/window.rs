@@ -221,11 +221,6 @@ impl Window {
             .height_request(480)
             .content(&split)
             .build();
-        let breakpoint = adw::Breakpoint::new(
-            adw::BreakpointCondition::parse("max-width: 560sp").expect("valid breakpoint"),
-        );
-        breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-        window.add_breakpoint(breakpoint);
 
         // Handlers. The "Sign in" buttons are connected once the window is shared.
         sign_out.connect_clicked(glib::clone!(
@@ -611,8 +606,16 @@ fn choose_acsm(window: &adw::ApplicationWindow, core: Arc<App>) {
         .build();
     dialog.open(Some(window), gio::Cancellable::NONE, move |result| {
         // A dismissed dialog reports an error; there is nothing to import then.
-        if let Some(path) = result.ok().and_then(|file| file.path()) {
-            core.import_acsm(path.to_string_lossy().into_owned());
+        let Some(path) = result.ok().and_then(|file| file.path()) else {
+            return;
+        };
+        // The app takes the path as text; a lossy copy would name another file.
+        match path.to_str() {
+            Some(path) => core.import_acsm(path.to_owned()),
+            None => core.add_message(format!(
+                "{} cannot be used: its name is not valid Unicode.",
+                path.display()
+            )),
         }
     });
 }
