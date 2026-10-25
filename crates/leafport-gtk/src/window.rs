@@ -80,7 +80,7 @@ impl Window {
             .wrap(true)
             .css_classes(["heading"])
             .build();
-        let sign_out = gtk::Button::with_label("Sign out");
+        let sign_out = gtk::Button::with_label("Sign Out");
         let signed_in = vbox(6);
         signed_in.append(
             &gtk::Label::builder()
@@ -105,7 +105,7 @@ impl Window {
         account.add_named(&signed_in, Some("signed-in"));
         account.add_named(&signed_out, Some("signed-out"));
 
-        let refresh = gtk::Button::with_label("Refresh list");
+        let refresh = gtk::Button::with_label("Refresh List");
         let refresh_spinner = gtk::Spinner::new();
         let refresh_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         refresh_row.append(&refresh);
@@ -153,8 +153,8 @@ impl Window {
             .primary(true)
             .tooltip_text("Main Menu")
             .build();
-        let sync_all = gtk::Button::with_label("Sync all");
-        let cancel_all = gtk::Button::with_label("Cancel all");
+        let sync_all = gtk::Button::with_label("Sync All");
+        let cancel_all = gtk::Button::with_label("Cancel All");
 
         let header = adw::HeaderBar::new();
         header.pack_start(&import);
@@ -222,7 +222,7 @@ impl Window {
             .content(&split)
             .build();
 
-        // Handlers. The "Sign in" buttons are connected once the window is shared.
+        // Handlers. The "Sign In" buttons are connected once the window is shared.
         sign_out.connect_clicked(glib::clone!(
             #[strong]
             core,
@@ -419,12 +419,12 @@ impl Window {
             );
         }
         let confirm = if row.on_loan {
-            "Return and remove"
+            "Return and Remove"
         } else {
             "Remove"
         };
         let dialog = adw::AlertDialog::new(
-            Some(&format!("Remove \"{}\" from disk?", row.title)),
+            Some(&format!("Remove \"{}\" from Disk?", row.title)),
             Some(&body),
         );
         dialog.add_responses(&[("cancel", "Cancel"), ("remove", confirm)]);
@@ -529,10 +529,10 @@ fn vbox(spacing: i32) -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Vertical, spacing)
 }
 
-/// A "Sign in" button. `Window::new` connects it to the sign-in dialog.
+/// A "Sign In" button. `Window::new` connects it to the sign-in dialog.
 fn sign_in_button() -> gtk::Button {
     gtk::Button::builder()
-        .label("Sign in")
+        .label("Sign In")
         .halign(gtk::Align::Start)
         .css_classes(["suggested-action"])
         .build()

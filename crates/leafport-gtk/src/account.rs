@@ -192,7 +192,7 @@ impl SignInDialog {
 
     fn build() -> Rc<Self> {
         let status = wrapped_label(&[]);
-        let refresh = gtk::Button::with_label("Refresh providers");
+        let refresh = gtk::Button::with_label("Refresh Providers");
         let refresh_spinner = gtk::Spinner::new();
         let status_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         status.set_hexpand(true);
@@ -223,7 +223,7 @@ impl SignInDialog {
         credentials.add(&password);
 
         let sign_in = gtk::Button::builder()
-            .label("Sign in")
+            .label("Sign In")
             .halign(gtk::Align::Start)
             .css_classes(["suggested-action"])
             .build();
@@ -255,7 +255,7 @@ impl SignInDialog {
         view.add_top_bar(&adw::HeaderBar::new());
         view.set_content(Some(&page));
         let dialog = adw::Dialog::builder()
-            .title("Sign in")
+            .title("Sign In")
             .content_width(520)
             .child(&view)
             .build();

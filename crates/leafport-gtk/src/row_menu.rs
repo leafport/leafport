@@ -9,19 +9,19 @@ use leafport_app::{MenuAction, Row};
 use crate::window::Window;
 
 /// One menu item per entry of `row.menu`, in order, each targeting the row key.
-/// "Show in folder" is left out when the row has no folder. A disabled "Cancel sync"
+/// "Show in Folder" is left out when the row has no folder. A disabled "Cancel Sync"
 /// names an action the group does not define, so GTK shows it insensitive.
 pub fn menu_model(row: &Row) -> gio::Menu {
     let menu = gio::Menu::new();
     for entry in &row.menu {
         let (label, action) = match entry {
-            MenuAction::CancelSync { enabled: true } => ("Cancel sync", "row.cancel"),
-            MenuAction::CancelSync { enabled: false } => ("Cancel sync", "row.cancel-disabled"),
-            MenuAction::SyncAgain => ("Sync again", "row.sync"),
-            MenuAction::ReturnLoan => ("Return loan", "row.return"),
+            MenuAction::CancelSync { enabled: true } => ("Cancel Sync", "row.cancel"),
+            MenuAction::CancelSync { enabled: false } => ("Cancel Sync", "row.cancel-disabled"),
+            MenuAction::SyncAgain => ("Sync Again", "row.sync"),
+            MenuAction::ReturnLoan => ("Return Loan", "row.return"),
             MenuAction::ShowInFolder if row.folder.is_none() => continue,
-            MenuAction::ShowInFolder => ("Show in folder", "row.show-in-folder"),
-            MenuAction::RemoveFromDisk => ("Remove from disk…", "row.remove"),
+            MenuAction::ShowInFolder => ("Show in Folder", "row.show-in-folder"),
+            MenuAction::RemoveFromDisk => ("Remove from Disk…", "row.remove"),
         };
         let item = gio::MenuItem::new(Some(label), None);
         item.set_action_and_target_value(Some(action), Some(&row.key.to_variant()));
@@ -135,10 +135,10 @@ mod tests {
         assert_eq!(
             strings(&menu, "label"),
             [
-                "Sync again",
-                "Return loan",
-                "Show in folder",
-                "Remove from disk…"
+                "Sync Again",
+                "Return Loan",
+                "Show in Folder",
+                "Remove from Disk…"
             ]
         );
         assert_eq!(

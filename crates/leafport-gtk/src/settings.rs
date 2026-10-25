@@ -80,7 +80,7 @@ impl PreferencesDialog {
 
     fn build() -> Rc<Self> {
         let folder = adw::ActionRow::builder()
-            .title("Books folder")
+            .title("Books Folder")
             .use_markup(false)
             .subtitle_selectable(true)
             .build();
