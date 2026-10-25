@@ -6,7 +6,7 @@ use std::time::Duration;
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use leafport_app::{Activity, Primary, Row, RowState};
+use leafport_app::{Activity, MenuAction, Primary, Row, RowState};
 
 use crate::covers::Covers;
 use crate::row_menu::menu_model;
@@ -42,6 +42,9 @@ mod imp {
         pub covers: RefCell<Option<Rc<Covers>>>,
         pub handlers: RefCell<Vec<glib::SignalHandlerId>>,
         pub pulse: RefCell<Option<glib::SourceId>>,
+        /// What the menu model was built from, so an update that keeps it does not
+        /// replace the model and close an open menu.
+        pub menu_shown: RefCell<Option<MenuInputs>>,
     }
 
     #[glib::object_subclass]
@@ -113,6 +116,9 @@ impl RowWidget {
         for label in [&imp.title, &imp.info, &imp.note] {
             label.set_xalign(0.0);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_selectable(true);
+            // A selectable label takes focus; keep Tab moving between the row buttons.
+            label.set_focusable(false);
             text.append(label);
         }
         self.append(&text);
@@ -170,6 +176,7 @@ impl RowWidget {
             }
         }
         imp.covers.take();
+        imp.menu_shown.take();
     }
 
     /// Reload the picture when it shows `path`.
@@ -224,7 +231,11 @@ impl RowWidget {
         imp.primary.set_visible_child_name(page);
         imp.spinner.set_spinning(page == "spinner");
 
-        imp.menu.set_menu_model(Some(&menu_model(&row)));
+        let inputs = MenuInputs::of(&row);
+        if imp.menu_shown.borrow().as_ref() != Some(&inputs) {
+            imp.menu.set_menu_model(Some(&menu_model(&row)));
+            imp.menu_shown.replace(Some(inputs));
+        }
         imp.menu.set_sensitive(!row.menu.is_empty());
 
         self.update_progress();
@@ -360,6 +371,24 @@ impl CoverBox {
     }
 }
 
+/// The parts of a row that `menu_model` reads.
+#[derive(Debug, PartialEq)]
+pub struct MenuInputs {
+    key: String,
+    menu: Vec<MenuAction>,
+    has_folder: bool,
+}
+
+impl MenuInputs {
+    fn of(row: &Row) -> Self {
+        Self {
+            key: row.key.clone(),
+            menu: row.menu.clone(),
+            has_folder: row.folder.is_some(),
+        }
+    }
+}
+
 /// The state label, as in egui's `list.rs::state_label`.
 fn state_label(state: &RowState) -> &'static str {
     match state {
@@ -395,5 +424,76 @@ fn primary(row: &Row) -> (&'static str, Option<&'static str>) {
         // A row without an ACSM keeps a disabled button, labelled as it would be.
         None if row.state == RowState::Failed => ("Retry", None),
         None => ("Sync", None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> Row {
+        Row {
+            key: "k".into(),
+            title: "t".into(),
+            author: None,
+            format: "EPUB".into(),
+            state: RowState::Available,
+            expires: None,
+            cover_path: None,
+            folder: Some("/b/t".into()),
+            publication: None,
+            error: None,
+            warning: None,
+            on_loan: false,
+            activity: Activity::Idle,
+            primary: Some(Primary::Sync),
+            menu: vec![MenuAction::ShowInFolder],
+        }
+    }
+
+    #[test]
+    fn menu_inputs_ignore_fields_the_menu_does_not_show() {
+        let mut changed = row();
+        changed.title = "other".into();
+        changed.activity = Activity::Queued;
+        assert_eq!(MenuInputs::of(&row()), MenuInputs::of(&changed));
+    }
+
+    #[test]
+    fn menu_inputs_follow_entries_key_and_folder() {
+        let base = MenuInputs::of(&row());
+        let mut entries = row();
+        entries.menu = vec![MenuAction::CancelSync { enabled: true }];
+        let mut key = row();
+        key.key = "other".into();
+        let mut folder = row();
+        folder.folder = None;
+        for changed in [entries, key, folder] {
+            assert_ne!(MenuInputs::of(&changed), base);
+        }
+    }
+
+    #[test]
+    fn info_line_shows_expiry_only_on_loan() {
+        let mut loaned = row();
+        loaned.state = RowState::OnLoan;
+        loaned.expires = Some("2026-11-02T10:00:00Z".into());
+        assert_eq!(info_line(&loaned), "EPUB · On loan · until 2026-11-02");
+        let mut returned = loaned.clone();
+        returned.state = RowState::Returned;
+        assert_eq!(info_line(&returned), "EPUB · Returned");
+    }
+
+    #[test]
+    fn primary_keeps_a_disabled_button_without_an_action() {
+        let mut failed = row();
+        failed.primary = None;
+        failed.state = RowState::Failed;
+        assert_eq!(primary(&failed), ("Retry", None));
+        let mut open = row();
+        open.primary = Some(Primary::Open);
+        assert_eq!(primary(&open), ("Open", None));
+        open.publication = Some("/b/t/book.epub".into());
+        assert_eq!(primary(&open), ("Open", Some("row.open")));
     }
 }
