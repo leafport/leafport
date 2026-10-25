@@ -1,5 +1,6 @@
 //! The row list as a `gio::ListStore` of `RowObject`s, without any widgets.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gtk::gio;
@@ -107,6 +108,8 @@ impl RowObject {
 /// The rows as a list model, keeping one `RowObject` per key.
 pub struct RowStore {
     model: gio::ListStore,
+    /// The listed objects by key, so lookups do not walk the model.
+    index: RefCell<HashMap<String, RowObject>>,
 }
 
 impl Default for RowStore {
@@ -120,6 +123,7 @@ impl RowStore {
     pub fn new() -> Self {
         Self {
             model: gio::ListStore::new::<RowObject>(),
+            index: RefCell::default(),
         }
     }
 
@@ -131,13 +135,12 @@ impl RowStore {
     /// Replace the list. Keeps the `RowObject` of every key that stays and calls
     /// `set_row` on it when its row changed. Stale cover paths (see `stale_cover_paths`)
     /// are forgotten in `covers` before any object changes, so a widget that rebinds
-    /// requests the new cover after the old one is gone.
+    /// requests the new cover after the old one is gone. Only the range between the
+    /// unchanged start and end of the list is spliced, so a refresh that keeps the keys
+    /// in place leaves the view, its scroll position and its focus alone.
     pub fn set_rows(&self, rows: Vec<Row>, covers: &Covers) {
-        let mut old: HashMap<String, RowObject> = self
-            .objects()
-            .into_iter()
-            .map(|object| (object.key(), object))
-            .collect();
+        let current = self.objects();
+        let mut old = self.index.take();
         let mut stale = Vec::new();
         let mut changed = Vec::new();
         let mut objects = Vec::with_capacity(rows.len());
@@ -161,7 +164,27 @@ impl RowStore {
         for (object, row) in changed {
             object.set_row(row);
         }
-        self.model.splice(0, self.model.n_items(), &objects);
+        *self.index.borrow_mut() = objects
+            .iter()
+            .map(|object| (object.key(), object.clone()))
+            .collect();
+
+        let prefix = current
+            .iter()
+            .zip(&objects)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let suffix = current[prefix..]
+            .iter()
+            .rev()
+            .zip(objects[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let removed = current.len() - prefix - suffix;
+        let added = &objects[prefix..objects.len() - suffix];
+        if removed > 0 || !added.is_empty() {
+            self.model.splice(prefix as u32, removed as u32, added);
+        }
     }
 
     /// Replace one row; unknown keys are ignored. Stale cover paths are forgotten in
@@ -191,6 +214,7 @@ impl RowStore {
         if let Some(object) = self.model.item(position).and_downcast::<RowObject>() {
             covers.forget(&stale_cover_paths(&object.row(), None));
         }
+        self.index.borrow_mut().remove(key);
         self.model.remove(position);
     }
 
@@ -205,9 +229,7 @@ impl RowStore {
 
     /// The object of `key`, if listed.
     pub fn find(&self, key: &str) -> Option<RowObject> {
-        self.objects()
-            .into_iter()
-            .find(|object| object.key() == key)
+        self.index.borrow().get(key).cloned()
     }
 
     fn objects(&self) -> Vec<RowObject> {
@@ -279,6 +301,64 @@ mod tests {
         );
         assert_eq!(store.find("a").unwrap(), obj);
         assert_eq!(keys(&store), ["b", "a"]);
+    }
+
+    /// Records every `items-changed` as (position, removed, added).
+    fn record_changes(store: &RowStore) -> std::rc::Rc<std::cell::RefCell<Vec<(u32, u32, u32)>>> {
+        let changes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = changes.clone();
+        store
+            .model()
+            .connect_items_changed(move |_, position, removed, added| {
+                seen.borrow_mut().push((position, removed, added));
+            });
+        changes
+    }
+
+    #[test]
+    fn set_rows_with_same_keys_changes_no_items() {
+        let store = RowStore::new();
+        store.set_rows(
+            vec![row("a", Activity::Idle), row("b", Activity::Idle)],
+            &Covers::new(),
+        );
+        let changes = record_changes(&store);
+        let mut renamed = row("b", Activity::Idle);
+        renamed.title = "renamed".into();
+        store.set_rows(vec![row("a", Activity::Idle), renamed], &Covers::new());
+        assert!(changes.borrow().is_empty());
+        assert_eq!(store.find("b").unwrap().row().title, "renamed");
+    }
+
+    #[test]
+    fn set_rows_splices_only_the_changed_range() {
+        let store = RowStore::new();
+        let rows = |keys: &[&str]| keys.iter().map(|k| row(k, Activity::Idle)).collect();
+        store.set_rows(rows(&["a", "b", "c", "d"]), &Covers::new());
+        let changes = record_changes(&store);
+        // "b" leaves and "x" arrives between kept "a" and "c", "d".
+        store.set_rows(rows(&["a", "x", "c", "d"]), &Covers::new());
+        assert_eq!(*changes.borrow(), [(1, 1, 1)]);
+        assert_eq!(keys(&store), ["a", "x", "c", "d"]);
+        // Appending touches only the tail.
+        changes.borrow_mut().clear();
+        store.set_rows(rows(&["a", "x", "c", "d", "e"]), &Covers::new());
+        assert_eq!(*changes.borrow(), [(4, 0, 1)]);
+    }
+
+    #[test]
+    fn find_follows_set_rows_and_remove() {
+        let store = RowStore::new();
+        let covers = Covers::new();
+        store.set_rows(
+            vec![row("a", Activity::Idle), row("b", Activity::Idle)],
+            &covers,
+        );
+        store.remove("a", &covers);
+        assert!(store.find("a").is_none());
+        store.set_rows(vec![row("c", Activity::Idle)], &covers);
+        assert!(store.find("b").is_none());
+        assert_eq!(store.find("c").unwrap().key(), "c");
     }
 
     #[test]
