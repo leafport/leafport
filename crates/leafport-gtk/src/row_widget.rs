@@ -205,6 +205,8 @@ impl RowWidget {
             (None, None) => (None, false),
         };
         imp.note.set_label(note.map_or("", String::as_str));
+        // The note is ellipsized to one line; the tooltip holds all of it.
+        imp.note.set_tooltip_text(note.map(String::as_str));
         imp.note.set_visible(note.is_some());
         imp.note
             .set_css_classes(if error { &["error"] } else { &["dim-label"] });
@@ -229,6 +231,9 @@ impl RowWidget {
             Activity::Syncing { .. } => "bar",
         };
         imp.primary.set_visible_child_name(page);
+        // An excluded title has nothing to sync; its menu lifts the exclusion.
+        imp.primary
+            .set_visible(!(row.state == RowState::Excluded && row.primary.is_none()));
         imp.spinner.set_spinning(page == "spinner");
 
         let inputs = MenuInputs::of(&row);
@@ -418,6 +423,7 @@ fn state_label(state: &RowState) -> &'static str {
         RowState::OnLoan => "On loan",
         RowState::Returned => "Returned",
         RowState::Local => "Local",
+        RowState::Excluded => "Excluded",
         RowState::Failed => "Failed",
     }
 }

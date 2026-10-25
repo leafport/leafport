@@ -26,7 +26,7 @@ On Linux the app is `leafport-gtk`, a GTK4 and libadwaita front end. Building it
 
 `leafport-desktop` is the egui front end. It builds on macOS and Windows only, and is their UI until native apps exist. On Linux it prints a pointer to `leafport-gtk` and exits. The macOS and Windows builds have not been built or run.
 
-Both front ends show the library list from your account, with a cover, sync status and a button per book. They sign in and out, sync one book or all of them, cancel a queued or running sync, return a loan, and remove a downloaded book from disk. They import an ACSM file through a button or from the launch argument; on Linux, a second launch with an ACSM file hands it to the running window. The settings set the theme and the books folder.
+Both front ends show the library list from your account, with a cover, sync status and a button per book. They sign in and out, sync one book or all of them, cancel a queued or running sync or import, return a loan, and exclude a book from Sync All. An exclusion is stored as `excluded: true` in the book's `metadata.yaml`; excluding a book that was never synced writes its folder with the ACSM and metadata only. Leafport never deletes book folders. They import an ACSM file through the menu (Ctrl+O on Linux) or from the launch argument; on Linux, a second launch with an ACSM file hands it to the running window. The settings set the books folder; the egui app also sets the theme, while the GTK app follows the system style.
 
 ## Roadmap
 

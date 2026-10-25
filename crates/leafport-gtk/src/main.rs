@@ -2,6 +2,7 @@
 
 mod account;
 mod covers;
+mod operations;
 mod row_menu;
 mod row_widget;
 mod settings;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use leafport_app::{App, Event, Listener, Theme};
+use leafport_app::{App, Event, Listener};
 
 use crate::window::Window;
 
@@ -46,15 +47,6 @@ fn acsm_paths(files: &[gio::File]) -> Vec<String> {
         .collect()
 }
 
-/// The libadwaita color scheme for `theme`.
-pub fn color_scheme(theme: &Theme) -> adw::ColorScheme {
-    match theme {
-        Theme::System => adw::ColorScheme::Default,
-        Theme::Light => adw::ColorScheme::ForceLight,
-        Theme::Dark => adw::ColorScheme::ForceDark,
-    }
-}
-
 /// The app core and its window, created on the first `activate` or `open`.
 struct Shell {
     core: Arc<App>,
@@ -69,7 +61,6 @@ fn shell(app: &adw::Application, slot: &RefCell<Option<Rc<Shell>>>) -> Rc<Shell>
     let (tx, rx) = async_channel::unbounded();
     let core = App::new(Box::new(Forward { tx }));
     let snapshot = core.snapshot();
-    adw::StyleManager::default().set_color_scheme(color_scheme(&snapshot.settings.theme));
     let window = Window::new(app, core.clone(), snapshot);
     glib::spawn_future_local(glib::clone!(
         #[strong]
@@ -110,6 +101,9 @@ fn main() -> glib::ExitCode {
                 .build();
             app.add_action_entries([preferences]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
+            app.set_accels_for_action("win.import", &["<Control>o"]);
+            app.set_accels_for_action("win.refresh", &["<Control>r", "F5"]);
+            app.set_accels_for_action("win.show-sidebar", &["F9"]);
             row_widget::load_css();
         }
     ));
@@ -166,12 +160,5 @@ mod tests {
         drop(rx);
         let forward = Forward { tx };
         forward.on_event(Event::RowRemoved { key: "a".into() });
-    }
-
-    #[test]
-    fn color_scheme_maps_theme() {
-        assert_eq!(color_scheme(&Theme::System), adw::ColorScheme::Default);
-        assert_eq!(color_scheme(&Theme::Light), adw::ColorScheme::ForceLight);
-        assert_eq!(color_scheme(&Theme::Dark), adw::ColorScheme::ForceDark);
     }
 }

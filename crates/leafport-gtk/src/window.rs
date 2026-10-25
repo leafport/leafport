@@ -1,4 +1,4 @@
-//! The main window: split view with the account sidebar, header bar, banner and list.
+//! The main window: a collapsible account sidebar beside the header bar, banner and list.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -10,12 +10,15 @@ use leafport_app::{App, Event, Row, Settings, Snapshot, Status};
 
 use crate::account::{Account, SignInDialog};
 use crate::covers::Covers;
+use crate::operations::Operations;
 use crate::row_menu;
 use crate::row_widget::RowWidget;
 use crate::settings::PreferencesDialog;
 use crate::store::{RowObject, RowStore};
 
 const SIGNED_OUT_HINT: &str = "Sign in to see the books in your account.";
+const SYNC_ALL: &str = "Sync All";
+const ALL_SYNCED: &str = "All Books Synced";
 
 /// The application window and the widgets that follow the app state.
 pub struct Window {
@@ -25,16 +28,23 @@ pub struct Window {
     covers: Rc<Covers>,
     /// Shows `signed-in` or `signed-out` in the sidebar.
     account: gtk::Stack,
+    /// The sign-in provider, above the user.
+    provider: gtk::Label,
     user: gtk::Label,
-    refresh: gtk::Button,
-    refresh_spinner: gtk::Spinner,
-    /// The account note below the refresh button.
+    /// The account note below the account.
     note: gtk::Label,
-    importing: gtk::Box,
-    importing_spinner: gtk::Spinner,
-    sync_all: gtk::Button,
-    cancel_all: gtk::Button,
+    /// Shows `icon` or `spinner` in the refresh button.
+    refresh_stack: gtk::Stack,
+    refresh_spinner: gtk::Spinner,
+    refresh: gio::SimpleAction,
+    sync_all: gio::SimpleAction,
+    /// The menu section holding "Sync All", whose label says when all books are synced.
+    actions: gio::Menu,
+    sync_all_label: Cell<&'static str>,
+    operations: Operations,
     banner: adw::Banner,
+    /// Shows the app's notices over the body.
+    toasts: adw::ToastOverlay,
     /// Shows `signed-out` or `list`.
     body: gtk::Stack,
     /// The sign-in hint above the list while signed out.
@@ -49,23 +59,6 @@ pub struct Window {
     settings: RefCell<Settings>,
     /// The open preferences dialog, if any.
     preferences: RefCell<Option<Rc<PreferencesDialog>>>,
-    /// The open remove dialog, if any.
-    removing: RefCell<Option<Removing>>,
-}
-
-/// An open remove dialog and the row state it shows.
-struct Removing {
-    key: String,
-    folder: String,
-    on_loan: bool,
-    dialog: adw::AlertDialog,
-}
-
-impl Removing {
-    /// The `App::remove` arguments while `live` is still the row as shown.
-    fn args(&self, live: Option<&Row>) -> Option<(String, bool)> {
-        remove_args((&self.folder, self.on_loan), live)
-    }
 }
 
 impl Window {
@@ -80,14 +73,17 @@ impl Window {
             .wrap(true)
             .css_classes(["heading"])
             .build();
-        let sign_out = gtk::Button::with_label("Sign Out");
+        let provider = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build();
+        let sign_out = gtk::Button::builder()
+            .label("Sign Out")
+            .halign(gtk::Align::Start)
+            .build();
         let signed_in = vbox(6);
-        signed_in.append(
-            &gtk::Label::builder()
-                .label("Signed in as")
-                .xalign(0.0)
-                .build(),
-        );
+        signed_in.append(&provider);
         signed_in.append(&user);
         signed_in.append(&sign_out);
 
@@ -105,12 +101,6 @@ impl Window {
         account.add_named(&signed_in, Some("signed-in"));
         account.add_named(&signed_out, Some("signed-out"));
 
-        let refresh = gtk::Button::with_label("Refresh List");
-        let refresh_spinner = gtk::Spinner::new();
-        let refresh_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        refresh_row.append(&refresh);
-        refresh_row.append(&refresh_spinner);
-
         let note = gtk::Label::builder()
             .xalign(0.0)
             .wrap(true)
@@ -124,8 +114,6 @@ impl Window {
         sidebar_box.set_margin_start(12);
         sidebar_box.set_margin_end(12);
         sidebar_box.append(&account);
-        sidebar_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        sidebar_box.append(&refresh_row);
         sidebar_box.append(&note);
 
         let sidebar_view = adw::ToolbarView::new();
@@ -134,34 +122,46 @@ impl Window {
         let sidebar = adw::NavigationPage::new(&sidebar_view, "Leafport");
 
         // Header bar.
-        let import = gtk::Button::with_label("Import ACSM…");
-        let importing_spinner = gtk::Spinner::new();
-        let importing = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        importing.append(&importing_spinner);
-        importing.append(
-            &gtk::Label::builder()
-                .label("Importing…")
-                .css_classes(["dim-label"])
-                .build(),
-        );
+        let sidebar_toggle = gtk::ToggleButton::builder()
+            .icon_name("sidebar-show-symbolic")
+            .action_name("win.show-sidebar")
+            .tooltip_text("Toggle Sidebar")
+            .build();
+        let operations = Operations::new(core.clone());
 
+        let actions = gio::Menu::new();
+        actions.append(Some("Import ACSM…"), Some("win.import"));
+        actions.append(Some(SYNC_ALL), Some("win.sync-all"));
+        let app_section = gio::Menu::new();
+        app_section.append(Some("Preferences"), Some("app.preferences"));
         let menu = gio::Menu::new();
-        menu.append(Some("Preferences"), Some("app.preferences"));
+        menu.append_section(None, &actions);
+        menu.append_section(None, &app_section);
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
             .menu_model(&menu)
             .primary(true)
             .tooltip_text("Main Menu")
             .build();
-        let sync_all = gtk::Button::with_label("Sync All");
-        let cancel_all = gtk::Button::with_label("Cancel All");
+
+        let refresh_spinner = gtk::Spinner::new();
+        let refresh_stack = gtk::Stack::new();
+        refresh_stack.add_named(
+            &gtk::Image::from_icon_name("view-refresh-symbolic"),
+            Some("icon"),
+        );
+        refresh_stack.add_named(&refresh_spinner, Some("spinner"));
+        let refresh_button = gtk::Button::builder()
+            .child(&refresh_stack)
+            .action_name("win.refresh")
+            .tooltip_text("Refresh List")
+            .build();
 
         let header = adw::HeaderBar::new();
-        header.pack_start(&import);
-        header.pack_start(&importing);
+        header.pack_start(&sidebar_toggle);
+        header.pack_start(operations.button());
         header.pack_end(&menu_button);
-        header.pack_end(&sync_all);
-        header.pack_end(&cancel_all);
+        header.pack_end(&refresh_button);
 
         let banner = adw::Banner::new("");
         banner.set_use_markup(false);
@@ -203,13 +203,14 @@ impl Window {
         let content_view = adw::ToolbarView::new();
         content_view.add_top_bar(&header);
         content_view.add_top_bar(&banner);
-        content_view.set_content(Some(&body));
+        let toasts = adw::ToastOverlay::new();
+        toasts.set_child(Some(&body));
+        content_view.set_content(Some(&toasts));
         let content = adw::NavigationPage::new(&content_view, "Books");
 
-        let split = adw::NavigationSplitView::builder()
+        let split = adw::OverlaySplitView::builder()
             .sidebar(&sidebar)
             .content(&content)
-            .show_content(true)
             .build();
 
         let window = adw::ApplicationWindow::builder()
@@ -228,21 +229,26 @@ impl Window {
             core,
             move |_| core.sign_out()
         ));
-        refresh.connect_clicked(glib::clone!(
+        window.add_action(&gio::PropertyAction::new(
+            "show-sidebar",
+            &split,
+            "show-sidebar",
+        ));
+        let refresh = gio::SimpleAction::new("refresh", None);
+        refresh.connect_activate(glib::clone!(
             #[strong]
             core,
-            move |_| core.refresh()
+            move |_, _| core.refresh()
         ));
-        sync_all.connect_clicked(glib::clone!(
+        window.add_action(&refresh);
+        let sync_all = gio::SimpleAction::new("sync-all", None);
+        sync_all.connect_activate(glib::clone!(
             #[strong]
             core,
-            move |_| core.sync_all()
+            move |_, _| core.sync_all()
         ));
-        cancel_all.connect_clicked(glib::clone!(
-            #[strong]
-            core,
-            move |_| core.cancel_all()
-        ));
+        window.add_action(&sync_all);
+        let import = gio::SimpleAction::new("import", None);
         banner.connect_button_clicked(glib::clone!(
             #[strong]
             core,
@@ -252,13 +258,14 @@ impl Window {
                 core.clear_banner();
             }
         ));
-        import.connect_clicked(glib::clone!(
+        import.connect_activate(glib::clone!(
             #[weak]
             window,
             #[strong]
             core,
-            move |_| choose_acsm(&window, core.clone())
+            move |_, _| choose_acsm(&window, core.clone())
         ));
+        window.add_action(&import);
 
         let this = Rc::new(Window {
             window,
@@ -266,15 +273,18 @@ impl Window {
             store,
             covers,
             account,
+            provider,
             user,
-            refresh,
-            refresh_spinner,
             note,
-            importing,
-            importing_spinner,
+            refresh_stack,
+            refresh_spinner,
+            refresh,
             sync_all,
-            cancel_all,
+            actions,
+            sync_all_label: Cell::new(SYNC_ALL),
+            operations,
             banner,
+            toasts,
             body,
             list_hint,
             signed_out: Cell::new(true),
@@ -283,7 +293,6 @@ impl Window {
             dialog: RefCell::default(),
             settings: RefCell::new(snapshot.settings.clone()),
             preferences: RefCell::default(),
-            removing: RefCell::default(),
         });
         for button in [&sidebar_sign_in, &status_sign_in, &hint_sign_in] {
             let this = Rc::downgrade(&this);
@@ -313,6 +322,7 @@ impl Window {
             Event::RowRemoved { key } => self.store.remove(&key, &self.covers),
             Event::Progress { key, fraction } => {
                 self.store.progress(&key, fraction);
+                self.operations.progress(&key, fraction);
                 return;
             }
             // `apply_status` updates the body itself.
@@ -330,13 +340,22 @@ impl Window {
                 }
                 return;
             }
+            Event::Notice { message } => {
+                // Book titles are not markup.
+                let toast = adw::Toast::builder()
+                    .title(message.as_str())
+                    .use_markup(false)
+                    .build();
+                self.toasts.add_toast(toast);
+                return;
+            }
             Event::Providers { result } => {
                 self.sign_in.borrow_mut().on_providers(result);
                 self.update_dialog();
                 return;
             }
         }
-        self.close_stale_remove();
+        self.update_sync_all();
         self.update_body();
     }
 
@@ -403,91 +422,34 @@ impl Window {
         self.store.find(key).map(|object| object.row())
     }
 
-    /// Ask before removing the title folder of `key`. Does nothing when the row is gone
-    /// or has no folder.
-    pub fn confirm_remove(self: &Rc<Self>, key: &str) {
-        let Some(row) = self.row(key) else {
-            return;
-        };
-        let Some(folder) = &row.folder else {
-            return;
-        };
-        let mut body = format!("This deletes {folder}.\nThe book stays in your cloud library.");
-        if row.on_loan {
-            body.push_str(
-                "\nThe loan is returned first. The folder is deleted once the return succeeds.",
-            );
-        }
-        let confirm = if row.on_loan {
-            "Return and Remove"
-        } else {
-            "Remove"
-        };
-        let dialog = adw::AlertDialog::new(
-            Some(&format!("Remove \"{}\" from Disk?", row.title)),
-            Some(&body),
-        );
-        dialog.add_responses(&[("cancel", "Cancel"), ("remove", confirm)]);
-        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        // The row may change while the dialog is open: `close_stale_remove` closes it
-        // then, and a confirm acts only on the row as shown.
-        let window = Rc::downgrade(self);
-        dialog.connect_response(None, move |dialog, response| {
-            let Some(window) = window.upgrade() else {
-                return;
-            };
-            let removing = window
-                .removing
-                .borrow_mut()
-                .take_if(|removing| removing.dialog == *dialog);
-            if let Some(removing) = removing
-                && response == "remove"
-                && let Some((key, on_loan)) = removing.args(window.row(&removing.key).as_ref())
-            {
-                window.core.remove(key, on_loan);
-            }
-        });
-        *self.removing.borrow_mut() = Some(Removing {
-            key: row.key.clone(),
-            folder: folder.clone(),
-            on_loan: row.on_loan,
-            dialog: dialog.clone(),
-        });
-        dialog.present(Some(&self.window));
-    }
-
-    /// Close the remove dialog when its row is gone or its folder or loan changed.
-    fn close_stale_remove(&self) {
-        let stale = self
-            .removing
-            .borrow_mut()
-            .take_if(|removing| removing.args(self.row(&removing.key).as_ref()).is_none());
-        if let Some(removing) = stale {
-            removing.dialog.close();
-        }
-    }
-
     fn apply_status(&self, status: &Status) {
         match &status.user {
             Some(user) => {
-                self.user.set_label(user);
+                let provider = status
+                    .provider
+                    .as_ref()
+                    .map(|provider| format!("Signed in with {provider}"));
+                self.provider
+                    .set_label(provider.as_deref().unwrap_or("Signed in as"));
+                self.user
+                    .set_label(status.username.as_deref().unwrap_or(user));
                 self.account.set_visible_child_name("signed-in");
             }
             None => self.account.set_visible_child_name("signed-out"),
         }
         self.refresh
-            .set_sensitive(status.user.is_some() && !status.refreshing);
+            .set_enabled(status.user.is_some() && !status.refreshing);
+        self.refresh_stack
+            .set_visible_child_name(if status.refreshing { "spinner" } else { "icon" });
         set_spinning(&self.refresh_spinner, status.refreshing);
         let note = self.sign_in.borrow().note(status);
         self.note.set_visible(!note.is_empty());
         self.note.set_label(&note);
 
-        self.importing.set_visible(status.importing);
-        set_spinning(&self.importing_spinner, status.importing);
-        self.sync_all.set_sensitive(status.can_sync_all);
-        self.cancel_all.set_visible(status.can_cancel_all);
+        self.sync_all.set_enabled(status.can_sync_all);
+        self.update_sync_all();
+        self.operations
+            .update(&status.operations, status.can_cancel_all);
 
         self.banner.set_title(&status.banner.join("\n"));
         self.banner.set_revealed(!status.banner.is_empty());
@@ -504,6 +466,20 @@ impl Window {
         }
     }
 
+    /// Label the "Sync All" item "All Books Synced" while signed in with rows and nothing
+    /// to sync. A menu item has no tooltip, so the label says why it is disabled.
+    fn update_sync_all(&self) {
+        let all_synced = self.status.borrow().user.is_some()
+            && !self.status.borrow().can_sync_all
+            && self.store.model().n_items() > 0;
+        let label = if all_synced { ALL_SYNCED } else { SYNC_ALL };
+        if self.sync_all_label.get() != label {
+            self.actions.remove(1);
+            self.actions.insert(1, Some(label), Some("win.sync-all"));
+            self.sync_all_label.set(label);
+        }
+    }
+
     /// Show the status page while signed out with no rows, the list otherwise.
     fn update_body(&self) {
         let page = if self.signed_out.get() && self.store.model().n_items() == 0 {
@@ -513,16 +489,6 @@ impl Window {
         };
         self.body.set_visible_child_name(page);
     }
-}
-
-/// The arguments of `App::remove` for `live`, the row now listed: its key and `on_loan`.
-/// `None` when the row is gone, or its folder or `on_loan` differs from `shown`, what the
-/// remove dialog showed.
-fn remove_args(shown: (&str, bool), live: Option<&Row>) -> Option<(String, bool)> {
-    let row = live?;
-    let (folder, on_loan) = shown;
-    (row.folder.as_deref() == Some(folder) && row.on_loan == on_loan)
-        .then(|| (row.key.clone(), row.on_loan))
 }
 
 fn vbox(spacing: i32) -> gtk::Box {
@@ -618,72 +584,4 @@ fn choose_acsm(window: &adw::ApplicationWindow, core: Arc<App>) {
             )),
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use leafport_app::{Activity, RowState};
-
-    fn row(folder: Option<&str>, on_loan: bool) -> Row {
-        Row {
-            key: "k1".into(),
-            title: "t".into(),
-            author: None,
-            format: "EPUB".into(),
-            state: RowState::Synced,
-            expires: None,
-            cover_path: None,
-            folder: folder.map(Into::into),
-            publication: None,
-            error: None,
-            warning: None,
-            on_loan,
-            activity: Activity::Idle,
-            primary: None,
-            menu: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn remove_args_skips_gone_row() {
-        assert_eq!(remove_args(("/b/t", false), None), None);
-    }
-
-    #[test]
-    fn remove_args_skips_row_without_folder() {
-        assert_eq!(remove_args(("/b/t", false), Some(&row(None, false))), None);
-    }
-
-    #[test]
-    fn remove_args_skips_row_with_other_folder() {
-        assert_eq!(
-            remove_args(("/b/t", false), Some(&row(Some("/n/t"), false))),
-            None
-        );
-    }
-
-    #[test]
-    fn remove_args_skips_row_whose_loan_changed() {
-        assert_eq!(
-            remove_args(("/b/t", false), Some(&row(Some("/b/t"), true))),
-            None
-        );
-        assert_eq!(
-            remove_args(("/b/t", true), Some(&row(Some("/b/t"), false))),
-            None
-        );
-    }
-
-    #[test]
-    fn remove_args_of_row_as_shown() {
-        assert_eq!(
-            remove_args(("/b/t", false), Some(&row(Some("/b/t"), false))),
-            Some(("k1".to_owned(), false))
-        );
-        assert_eq!(
-            remove_args(("/b/t", true), Some(&row(Some("/b/t"), true))),
-            Some(("k1".to_owned(), true))
-        );
-    }
 }

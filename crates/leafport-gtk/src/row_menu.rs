@@ -21,7 +21,8 @@ pub fn menu_model(row: &Row) -> gio::Menu {
             MenuAction::ReturnLoan => ("Return Loan", "row.return"),
             MenuAction::ShowInFolder if row.folder.is_none() => continue,
             MenuAction::ShowInFolder => ("Show in Folder", "row.show-in-folder"),
-            MenuAction::RemoveFromDisk => ("Remove from Disk…", "row.remove"),
+            MenuAction::Exclude => ("Exclude from Sync", "row.exclude"),
+            MenuAction::Include => ("Include in Sync", "row.include"),
         };
         let item = gio::MenuItem::new(Some(label), None);
         item.set_action_and_target_value(Some(action), Some(&row.key.to_variant()));
@@ -30,7 +31,7 @@ pub fn menu_model(row: &Row) -> gio::Menu {
     menu
 }
 
-/// The "row" group: open, sync, cancel, return, show-in-folder and remove, each taking
+/// The "row" group: open, sync, cancel, return, show-in-folder, exclude and include, each taking
 /// the row key (`s`). An action whose row is gone does nothing.
 pub fn action_group(window: &Rc<Window>) -> gio::SimpleActionGroup {
     let group = gio::SimpleActionGroup::new();
@@ -62,7 +63,12 @@ pub fn action_group(window: &Rc<Window>) -> gio::SimpleActionGroup {
             launch(window, folder, true);
         }
     });
-    add("remove", |window, key| window.confirm_remove(key));
+    add("exclude", |window, key| {
+        window.core().set_excluded(key.to_owned(), true)
+    });
+    add("include", |window, key| {
+        window.core().set_excluded(key.to_owned(), false)
+    });
     group
 }
 
@@ -128,7 +134,7 @@ mod tests {
                 MenuAction::SyncAgain,
                 MenuAction::ReturnLoan,
                 MenuAction::ShowInFolder,
-                MenuAction::RemoveFromDisk,
+                MenuAction::Exclude,
             ],
             Some("/b/t"),
         ));
@@ -138,12 +144,17 @@ mod tests {
                 "Sync Again",
                 "Return Loan",
                 "Show in Folder",
-                "Remove from Disk…"
+                "Exclude from Sync"
             ]
         );
         assert_eq!(
             strings(&menu, "action"),
-            ["row.sync", "row.return", "row.show-in-folder", "row.remove"]
+            [
+                "row.sync",
+                "row.return",
+                "row.show-in-folder",
+                "row.exclude"
+            ]
         );
     }
 

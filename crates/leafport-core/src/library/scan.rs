@@ -132,9 +132,13 @@ fn read_folder(folder: PathBuf) -> LocalItem {
 pub enum ItemState {
     Available,
     Synced,
-    OnLoan { expires: Option<String> },
+    OnLoan {
+        expires: Option<String>,
+    },
     Returned,
     Local,
+    /// Sync All skips it; see `Metadata::excluded`.
+    Excluded,
     Failed(String),
 }
 
@@ -153,15 +157,20 @@ pub struct Item {
     pub warning: Option<String>,
 }
 
-fn matched_state(m: &Metadata) -> ItemState {
-    if let Some(loan) = &m.loan {
+fn matched_state(m: &Metadata, has_publication: bool) -> ItemState {
+    if m.excluded {
+        ItemState::Excluded
+    } else if let Some(loan) = &m.loan {
         ItemState::OnLoan {
             expires: loan.expires.clone(),
         }
     } else if m.returned {
         ItemState::Returned
-    } else {
+    } else if has_publication {
         ItemState::Synced
+    } else {
+        // A folder holding only the ACSM, from an exclusion that was lifted.
+        ItemState::Available
     }
 }
 
@@ -235,7 +244,7 @@ pub fn merge(cloud: &[DownloadRecord], local: &[LocalItem]) -> Vec<Item> {
                 Format::Unknown => item.format,
                 f => f,
             };
-            item.state = matched_state(m);
+            item.state = matched_state(m, l.publication.is_some());
             item.folder = Some(l.folder.clone());
             item.publication = l.publication.clone();
             item.cover = l.cover.clone();

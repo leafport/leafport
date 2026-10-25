@@ -408,10 +408,12 @@ mod tests {
     fn status(user: Option<&str>) -> Status {
         Status {
             user: user.map(Into::into),
+            username: None,
+            provider: None,
             signing_in: false,
             loading_providers: false,
             refreshing: false,
-            importing: false,
+            operations: Vec::new(),
             job_running: false,
             can_sync_all: false,
             can_cancel_all: false,

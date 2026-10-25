@@ -13,9 +13,13 @@ use leafport_core::library::{
 use leafport_core::service::CancelToken;
 use leafport_core::vendors::VendorCatalog;
 
-use crate::ops::{Ops, Paths, SyncHooks};
+use crate::notice::Batch;
+use crate::ops::{Account, Ops, Paths, SyncHooks};
 use crate::rows::{self, Busy, Job, StatusInputs};
-use crate::{AppError, Event, Listener, Provider, Row, Settings, Snapshot, Status, Theme};
+use crate::{
+    AppError, Event, Listener, Operation, OperationKind, Provider, Row, Settings, Snapshot, Status,
+    Theme,
+};
 
 /// The most banner messages kept; older ones drop off.
 const BANNER_LINES: usize = 5;
@@ -65,6 +69,8 @@ pub(crate) enum Msg {
     Cancel(String),
     /// Drop every queued sync and cancel the running one. Imports stay.
     CancelAll,
+    /// Drop the queued import of the file at this path.
+    CancelImport(String),
     /// Queue an import of the ACSM file at this path.
     Import(PathBuf),
     /// Download progress of the sync of `key`.
@@ -80,11 +86,8 @@ pub(crate) enum Msg {
     Imported(Result<SyncOutcome, String>),
     /// Return the loan of this key.
     ReturnLoan(String),
-    /// Delete the title folder of this key, returning its loan first when asked.
-    Remove {
-        key: String,
-        return_loan_first: bool,
-    },
+    /// Exclude the row with this key from Sync All, or include it again.
+    SetExcluded { key: String, excluded: bool },
     /// A finished loan return.
     Returned {
         key: String,
@@ -106,8 +109,8 @@ pub(crate) enum Msg {
         username: String,
         password: zeroize::Zeroizing<String>,
     },
-    /// A finished sign-in: the account label.
-    SignedIn(Result<String, String>),
+    /// A finished sign-in: the account.
+    SignedIn(Result<Account, String>),
     /// Forget the stored activation and the cloud list.
     SignOut,
     /// A finished sign-out.
@@ -136,13 +139,12 @@ pub(crate) struct State {
     pub returning: HashSet<String>,
     /// Last return error per row key. Kept apart from `failures`, so the row stays OnLoan.
     pub row_errors: HashMap<String, String>,
-    /// Rows whose title folder is deleted once their running return succeeds, with the
-    /// folder the user confirmed when asking.
-    pub remove_after_return: HashMap<String, PathBuf>,
+    /// What finished since the sync and import queue was last empty.
+    pub batch: Batch,
     /// Recent unique messages, oldest first.
     pub banner: Vec<String>,
-    /// The signed-in account label.
-    pub user: Option<String>,
+    /// The signed-in account.
+    pub account: Option<Account>,
     pub refreshing: bool,
     /// The sign-in providers; kept when a later load fails and across sign-out.
     pub catalog: Arc<VendorCatalog>,
@@ -200,7 +202,7 @@ impl State {
             Some(Ok(cloud)) => cloud,
             None => vec![],
         };
-        let user = ops.signed_in_user().unwrap_or_else(|e| {
+        let account = ops.signed_in_user().unwrap_or_else(|e| {
             add_banner(&mut banner, format!("Credential store unavailable: {e}"));
             None
         });
@@ -217,9 +219,9 @@ impl State {
             committed: false,
             returning: HashSet::new(),
             row_errors: HashMap::new(),
-            remove_after_return: HashMap::new(),
+            batch: Batch::default(),
             banner,
-            user,
+            account,
             refreshing: false,
             catalog: Arc::new(VendorCatalog::new()),
             loading_providers: false,
@@ -282,41 +284,80 @@ impl State {
             .collect()
     }
 
-    /// Delete the title folder of the row with `key` and rescan. The book stays in the
-    /// cloud list.
-    pub(crate) fn remove_folder(&mut self, key: &str) {
-        let Some(folder) = self.folder_of(key) else {
+    /// Mark the row with `key` excluded or included and rescan. A running sync of it
+    /// is left alone; a queued one is dropped when excluding.
+    fn set_excluded(&mut self, key: &str, excluded: bool) {
+        if matches!(&self.running, Some(Job::Sync(k)) if k == key) {
+            return;
+        }
+        let Some(item) = self.items.iter().find(|item| item.key == key).cloned() else {
             return;
         };
-        self.remove_path(key, &folder);
-    }
-
-    /// The title folder of the row with `key`.
-    pub(crate) fn folder_of(&self, key: &str) -> Option<PathBuf> {
-        self.items
-            .iter()
-            .find(|item| item.key == key)
-            .and_then(|item| item.folder.clone())
-    }
-
-    /// Delete `folder`, the title folder of the row with `key`, and rescan.
-    fn remove_path(&mut self, key: &str, folder: &std::path::Path) {
-        // Only a title folder directly inside the books folder is ever deleted.
-        if folder.parent() != Some(self.library.root.as_path()) {
-            self.add_banner(format!(
-                "Not removing {}: outside the books folder",
-                folder.display()
-            ));
+        if self.library.root.as_os_str().is_empty() {
+            self.add_banner("No books folder could be determined.".into());
             return;
         }
-        match std::fs::remove_dir_all(folder) {
+        if excluded {
+            self.queue
+                .retain(|job| !matches!(job, Job::Sync(k) if k == key));
+        }
+        match self.library.set_excluded(&item, excluded) {
             Ok(()) => {
                 self.failures.remove(key);
-                self.row_errors.remove(key);
             }
-            Err(e) => self.add_banner(format!("Could not remove {}: {e}", folder.display())),
+            Err(e) => self.add_banner(format!("Could not update \"{}\": {e}", item.title)),
         }
         self.rescan();
+    }
+
+    /// The signed-in account ID.
+    fn user(&self) -> Option<&str> {
+        self.account.as_ref().map(|account| account.id.as_str())
+    }
+
+    /// The running and queued syncs and imports, then the running loan returns.
+    fn operations(&self) -> Vec<Operation> {
+        let title = |key: &str| {
+            self.items
+                .iter()
+                .find(|item| item.key == key)
+                .map_or_else(|| key.to_owned(), |item| item.title.clone())
+        };
+        let operation = |job: &Job, running: bool| match job {
+            Job::Sync(key) => Operation {
+                kind: OperationKind::Sync { key: key.clone() },
+                label: title(key),
+                running,
+                cancellable: !running || self.running_cancellable(),
+            },
+            Job::Import(path) => Operation {
+                kind: OperationKind::Import {
+                    path: path.to_string_lossy().into_owned(),
+                },
+                label: path.file_name().map_or_else(
+                    || path.to_string_lossy().into_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                running,
+                cancellable: !running,
+            },
+        };
+        let mut operations: Vec<Operation> = self
+            .running
+            .iter()
+            .map(|job| operation(job, true))
+            .chain(self.queue.iter().map(|job| operation(job, false)))
+            .collect();
+        // `returning` has no order; keep the list stable between updates.
+        let mut returns: Vec<&String> = self.returning.iter().collect();
+        returns.sort_by_key(|key| (title(key), key.as_str()));
+        operations.extend(returns.into_iter().map(|key| Operation {
+            kind: OperationKind::Return { key: key.clone() },
+            label: title(key),
+            running: true,
+            cancellable: false,
+        }));
+        operations
     }
 
     /// Save `new`, and on a books folder change open the new folder. The theme is applied
@@ -450,7 +491,7 @@ impl State {
     fn status(&self) -> Status {
         let root = &self.library.root;
         let mut status = rows::status(&StatusInputs {
-            user: self.user.as_deref(),
+            user: self.user(),
             refreshing: self.refreshing,
             banner: &self.banner,
             books_dir: (!root.as_os_str().is_empty()).then_some(root.as_path()),
@@ -461,9 +502,19 @@ impl State {
         let info = self.catalog.service_info();
         status.sign_in_ready =
             info.auth_url.is_some() && info.certificate.as_deref().is_some_and(|c| !c.is_empty());
-        status.importing = matches!(self.running, Some(Job::Import(_)));
+        status.operations = self.operations();
         status.job_running = self.job_running();
-        status.can_sync_all = self.user.is_some() && !self.unsynced().is_empty();
+        status.can_sync_all = self.account.is_some() && !self.unsynced().is_empty();
+        if let Some(account) = &self.account {
+            status.username = account.username.clone();
+            status.provider = account.method.as_ref().map(|method| {
+                self.catalog
+                    .entries()
+                    .iter()
+                    .find(|vendor| vendor.method == *method)
+                    .map_or_else(|| method.clone(), |vendor| vendor.name.clone())
+            });
+        }
         status.can_cancel_all =
             self.running_cancellable() || self.queue.iter().any(|job| matches!(job, Job::Sync(_)));
         status
@@ -506,6 +557,16 @@ fn settings(settings: &library::Settings) -> Settings {
             library::Theme::Light => Theme::Light,
             library::Theme::Dark => Theme::Dark,
         },
+    }
+}
+
+/// Once the sync and import queue is empty, report what finished since it last was.
+fn finish_batch(state: &mut State, events: &mut Vec<Event>) {
+    if state.running.is_some() || !state.queue.is_empty() {
+        return;
+    }
+    if let Some(message) = std::mem::take(&mut state.batch).message() {
+        events.push(Event::Notice { message });
     }
 }
 
@@ -555,7 +616,7 @@ impl Reactor {
         match msg {
             Msg::Refresh => self.refresh(state),
             Msg::Refreshed { generation, .. }
-                if generation != state.generation || state.user.is_none() =>
+                if generation != state.generation || state.account.is_none() =>
             {
                 // Started before a sign-in or sign-out: drop its list, and the file it
                 // wrote, without touching the cache. The user refreshes again if wanted.
@@ -568,6 +629,9 @@ impl Reactor {
                         state.adopt_refresh_file(generation);
                         state.cloud = cloud;
                         state.remerge();
+                        events.push(Event::Notice {
+                            message: "Library refreshed".into(),
+                        });
                     }
                     Err(e) => {
                         state.remove_refresh_file(generation);
@@ -595,7 +659,10 @@ impl Reactor {
                     request_cancel(state);
                 }
             }
-            Msg::Import(_) if state.user.is_none() => {
+            Msg::CancelImport(path) => state.queue.retain(
+                |job| !matches!(job, Job::Import(p) if p.to_string_lossy() == path.as_str()),
+            ),
+            Msg::Import(_) if state.account.is_none() => {
                 state.add_banner("Sign in before importing an ACSM.".into());
             }
             Msg::Import(path) => self.enqueue(state, Job::Import(path)),
@@ -617,6 +684,7 @@ impl Reactor {
                 match result {
                     Ok(outcome) => {
                         state.failures.remove(&key);
+                        state.batch.synced.push(outcome.metadata.title);
                         if let Some(warning) = outcome.warning {
                             state.add_banner(warning);
                         }
@@ -625,34 +693,22 @@ impl Reactor {
                     Err(_) if cancelled => {}
                     Err(e) => {
                         state.failures.insert(key, e);
+                        state.batch.failed += 1;
                     }
                 }
                 state.rescan();
                 self.start_next(state);
+                finish_batch(state, events);
             }
             Msg::ReturnLoan(key) => self.start_return(state, key),
-            Msg::Remove {
-                key,
-                return_loan_first,
-            } => {
-                if return_loan_first {
-                    if state.items.iter().any(|item| item.key == key) {
-                        // Only the folder confirmed now is deleted after the return.
-                        if let Some(folder) = state.folder_of(&key) {
-                            state.remove_after_return.insert(key.clone(), folder);
-                        }
-                        self.start_return(state, key);
-                    }
-                } else {
-                    state.remove_folder(&key);
-                }
-            }
+            Msg::SetExcluded { key, excluded } => state.set_excluded(&key, excluded),
             Msg::Returned { key, result } => {
                 state.returning.remove(&key);
-                let remove = state.remove_after_return.remove(&key);
                 match result {
-                    Ok(_) if let Some(folder) = remove => state.remove_path(&key, &folder),
-                    Ok(_) => {
+                    Ok(metadata) => {
+                        events.push(Event::Notice {
+                            message: format!("Loan for “{}” returned", metadata.title),
+                        });
                         state.row_errors.remove(&key);
                     }
                     Err(e) => {
@@ -700,7 +756,7 @@ impl Reactor {
                 username,
                 password,
             } => {
-                if state.signing_in || state.signing_out || state.user.is_some() {
+                if state.signing_in || state.signing_out || state.account.is_some() {
                     return;
                 }
                 state.sign_in_error = None;
@@ -727,9 +783,9 @@ impl Reactor {
             Msg::SignedIn(result) => {
                 state.signing_in = false;
                 match result {
-                    Ok(user) => {
+                    Ok(account) => {
                         state.sign_in_error = None;
-                        state.user = Some(user);
+                        state.account = Some(account);
                         state.new_generation();
                     }
                     Err(e) => state.sign_in_error = Some(format!("Sign-in failed: {e}")),
@@ -747,7 +803,7 @@ impl Reactor {
                 state.signing_out = false;
                 match result {
                     Ok(()) => {
-                        state.user = None;
+                        state.account = None;
                         state.new_generation();
                         state.remove_cache();
                         state.cloud.clear();
@@ -766,6 +822,7 @@ impl Reactor {
                 match result {
                     Ok(outcome) => {
                         state.failures.remove(&outcome.metadata.resource);
+                        state.batch.imported.push(outcome.metadata.title);
                         if let Some(warning) = outcome.warning {
                             state.add_banner(warning);
                         }
@@ -774,6 +831,7 @@ impl Reactor {
                 }
                 state.rescan();
                 self.start_next(state);
+                finish_batch(state, events);
             }
         }
     }
@@ -891,7 +949,7 @@ impl Reactor {
     }
 
     fn refresh(&self, state: &mut State) {
-        if state.refreshing || state.user.is_none() {
+        if state.refreshing || state.account.is_none() {
             return;
         }
         state.refreshing = true;
@@ -934,8 +992,12 @@ mod tests {
     struct NoOps;
 
     impl Ops for NoOps {
-        fn signed_in_user(&self) -> Result<Option<String>, String> {
-            Ok(Some("user@x".into()))
+        fn signed_in_user(&self) -> Result<Option<Account>, String> {
+            Ok(Some(Account {
+                id: "user@x".into(),
+                username: None,
+                method: None,
+            }))
         }
         fn load_providers(&self) -> Result<VendorCatalog, String> {
             unreachable!()
@@ -946,7 +1008,7 @@ mod tests {
             _: &str,
             _: String,
             _: zeroize::Zeroizing<String>,
-        ) -> Result<String, String> {
+        ) -> Result<Account, String> {
             unreachable!()
         }
         fn sign_out(&self) -> Result<(), String> {
@@ -1056,38 +1118,6 @@ mod tests {
         assert!(state.running_cancellable());
         reactor.apply(&mut state, Msg::Committed { key: "a".into() }, &mut events);
         assert!(!state.running_cancellable());
-        drop(state);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn remove_outside_root_refused() {
-        let (dir, reactor) = reactor();
-        let mut state = lock(&reactor.state);
-        let nested = state.library.root.join("a").join("b");
-        std::fs::create_dir_all(&nested).unwrap();
-        state.items.push(Item {
-            key: "k".into(),
-            title: "T".into(),
-            author: None,
-            format: leafport_core::library::Format::Epub,
-            state: ItemState::Synced,
-            acsm: None,
-            folder: Some(nested.clone()),
-            publication: None,
-            cover: None,
-            metadata: None,
-            warning: None,
-        });
-        state.remove_folder("k");
-        assert_eq!(
-            state.banner,
-            [format!(
-                "Not removing {}: outside the books folder",
-                nested.display()
-            )]
-        );
-        assert!(nested.exists());
         drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }

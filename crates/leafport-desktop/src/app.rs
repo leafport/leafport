@@ -1,5 +1,5 @@
 use eframe::egui;
-use leafport_app::{Activity, AppError, Event, Listener, Row, Settings, Status};
+use leafport_app::{Activity, AppError, Event, Listener, OperationKind, Row, Settings, Status};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -8,6 +8,9 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
 };
+
+/// How long a notice stays on screen.
+const NOTICE_TIME: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Passes the app's events to the UI thread and wakes it.
 struct Forward {
@@ -31,8 +34,8 @@ pub struct App {
     /// Download progress of syncing rows, once their download reports one.
     progress: HashMap<String, f32>,
     rx: Receiver<Event>,
-    /// Row whose removal awaits confirmation.
-    confirm_remove: Option<String>,
+    /// The latest notice and when it arrived; shown for `NOTICE_TIME`.
+    notice: Option<(String, std::time::Instant)>,
     settings_view: crate::settings_view::SettingsView,
     account: crate::account::Account,
     covers: crate::list::Covers,
@@ -74,7 +77,7 @@ impl App {
             settings: snapshot.settings,
             progress: HashMap::new(),
             rx,
-            confirm_remove: None,
+            notice: None,
             settings_view: crate::settings_view::SettingsView::default(),
             covers: crate::list::Covers::default(),
         }
@@ -135,53 +138,7 @@ impl App {
                 self.status = status;
             }
             Event::Providers { result } => self.account.on_providers(result),
-        }
-    }
-
-    /// The confirmation dialog for `confirm_remove`. An active loan is returned first;
-    /// its folder is deleted once the return succeeds.
-    fn remove_dialog(&mut self, ctx: &egui::Context) {
-        let Some(key) = self.confirm_remove.clone() else {
-            return;
-        };
-        let Some(row) = self.rows.iter().find(|row| row.key == key) else {
-            self.confirm_remove = None;
-            return;
-        };
-        let Some(folder) = row.folder.clone() else {
-            self.confirm_remove = None;
-            return;
-        };
-        let title = row.title.clone();
-        let on_loan = row.on_loan;
-        let mut confirmed = false;
-        let mut cancelled = false;
-        let modal = egui::Modal::new(egui::Id::unique("remove")).show(ctx, |ui| {
-            ui.set_max_width(420.0);
-            ui.heading(format!("Remove \"{title}\" from disk?"));
-            ui.label(format!("This deletes {folder}."));
-            ui.label("The book stays in your cloud library.");
-            if on_loan {
-                ui.label(
-                    "The loan is returned first. The folder is deleted once the return succeeds.",
-                );
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let confirm = if on_loan {
-                    "Return and remove"
-                } else {
-                    "Remove"
-                };
-                confirmed = ui.button(confirm).clicked();
-                cancelled = ui.button("Cancel").clicked();
-            });
-        });
-        if confirmed {
-            self.confirm_remove = None;
-            self.core.remove(key, on_loan);
-        } else if cancelled || modal.should_close() {
-            self.confirm_remove = None;
+            Event::Notice { message } => self.notice = Some((message, std::time::Instant::now())),
         }
     }
 
@@ -216,13 +173,32 @@ impl App {
                 if ui.button("Settings").clicked() {
                     self.settings_view.open(&self.settings);
                 }
-                if self.status.importing {
+                if let Some(running) = self.status.operations.iter().find(|op| op.running) {
                     ui.spinner();
-                    ui.weak("Importing…");
+                    let verb = match running.kind {
+                        OperationKind::Sync { .. } => "Syncing",
+                        OperationKind::Import { .. } => "Importing",
+                        OperationKind::Return { .. } => "Returning",
+                    };
+                    let waiting = self.status.operations.len() - 1;
+                    let mut text = format!("{verb} {}…", running.label);
+                    if waiting > 0 {
+                        text.push_str(&format!(" ({waiting} more)"));
+                    }
+                    ui.weak(text);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // A disabled button gets no explanation, so the label says why.
+                    let all_synced = self.status.user.is_some()
+                        && !self.status.can_sync_all
+                        && !self.rows.is_empty();
+                    let label = if all_synced {
+                        "All books synced"
+                    } else {
+                        "Sync all"
+                    };
                     if ui
-                        .add_enabled(self.status.can_sync_all, egui::Button::new("Sync all"))
+                        .add_enabled(self.status.can_sync_all, egui::Button::new(label))
                         .clicked()
                     {
                         self.core.sync_all();
@@ -258,6 +234,24 @@ impl App {
         });
     }
 
+    /// The latest notice at the bottom of the window, until `NOTICE_TIME` passed.
+    fn notice(&mut self, ctx: &egui::Context) {
+        let Some((message, since)) = &self.notice else {
+            return;
+        };
+        let Some(left) = NOTICE_TIME.checked_sub(since.elapsed()) else {
+            self.notice = None;
+            return;
+        };
+        egui::Area::new(egui::Id::unique("notice"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(message.as_str()));
+            });
+        ctx.request_repaint_after(left);
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("account")
             .default_size(220.0)
@@ -266,8 +260,11 @@ impl App {
                 ui.separator();
                 match self.status.user.clone() {
                     Some(user) => {
-                        ui.label("Signed in as");
-                        ui.strong(user);
+                        match &self.status.provider {
+                            Some(provider) => ui.label(format!("Signed in with {provider}")),
+                            None => ui.label("Signed in as"),
+                        };
+                        ui.strong(self.status.username.clone().unwrap_or(user));
                         if ui.button("Sign out").clicked() {
                             self.core.sign_out();
                         }
@@ -339,11 +336,12 @@ impl eframe::App for App {
                         .add_message(format!("Could not open {}: {e}", path.display()));
                 }
             }
-            Some(crate::list::Action::Remove(key)) => self.confirm_remove = Some(key),
+            Some(crate::list::Action::Exclude(key)) => self.core.set_excluded(key, true),
+            Some(crate::list::Action::Include(key)) => self.core.set_excluded(key, false),
             Some(crate::list::Action::Cancel(key)) => self.core.cancel(key),
             None => {}
         }
-        self.remove_dialog(&ctx);
+        self.notice(&ctx);
         if self.account.open {
             self.account.window(&self.core, &self.status, &ctx);
         }

@@ -12,7 +12,18 @@ use leafport_core::store::{
 };
 use leafport_core::vendors::VendorCatalog;
 
-use crate::ops::{Ops, SyncHooks};
+use crate::ops::{Account, Ops, SyncHooks};
+
+/// The account in `state`, with the name and method from its credential record.
+fn account(state: &ActivationState) -> Account {
+    let (method, username) = activation::account_username(&state.credentials_xml)
+        .map_or((None, None), |(method, username)| (method, Some(username)));
+    Account {
+        id: state.user.clone(),
+        username,
+        method,
+    }
+}
 
 /// Serializes every load, device activation and save of the stored activation state, so
 /// a sign-in and a sync never both register the device (each /Activate uses a slot).
@@ -30,9 +41,9 @@ fn activation_lock() -> std::sync::MutexGuard<'static, ()> {
 pub(crate) struct LiveOps;
 
 impl Ops for LiveOps {
-    fn signed_in_user(&self) -> Result<Option<String>, String> {
+    fn signed_in_user(&self) -> Result<Option<Account>, String> {
         ActivationState::load(&KeyringStore::new(), DEFAULT_ACCOUNT)
-            .map(|state| state.map(|state| state.user))
+            .map(|state| state.as_ref().map(account))
             .map_err(|e| e.to_string())
     }
 
@@ -50,7 +61,7 @@ impl Ops for LiveOps {
         method: &str,
         username: String,
         password: zeroize::Zeroizing<String>,
-    ) -> Result<String, String> {
+    ) -> Result<Account, String> {
         let info = catalog.service_info();
         let (auth_url, certificate) = match (info.auth_url.clone(), info.certificate.clone()) {
             (Some(auth_url), Some(certificate)) if !certificate.is_empty() => {
@@ -147,7 +158,11 @@ impl Ops for LiveOps {
                 e.to_string()
             }
         })?;
-        Ok(signed.user)
+        // The record normally names the account; the sign-in form says the same.
+        let mut signed_in = account(&state);
+        signed_in.username.get_or_insert(username);
+        signed_in.method.get_or_insert_with(|| method.to_owned());
+        Ok(signed_in)
     }
 
     fn sign_out(&self) -> Result<(), String> {

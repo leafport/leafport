@@ -10,6 +10,8 @@ pub enum RowState {
     OnLoan,
     Returned,
     Local,
+    /// Sync All skips it.
+    Excluded,
     Failed,
 }
 
@@ -34,11 +36,16 @@ pub enum Primary {
 /// An entry of the row's menu.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
-    CancelSync { enabled: bool },
+    CancelSync {
+        enabled: bool,
+    },
     SyncAgain,
     ReturnLoan,
     ShowInFolder,
-    RemoveFromDisk,
+    /// Mark the title so Sync All skips it.
+    Exclude,
+    /// Lift the exclusion.
+    Include,
 }
 
 /// The color theme setting.
@@ -75,11 +82,17 @@ pub struct Row {
 /// App-wide state outside the list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Status {
+    /// The signed-in account ID.
     pub user: Option<String>,
+    /// The name the account signed in with, when the credential record has it.
+    pub username: Option<String>,
+    /// The sign-in provider's name, or its method ID until the providers are loaded.
+    pub provider: Option<String>,
     pub signing_in: bool,
     pub loading_providers: bool,
     pub refreshing: bool,
-    pub importing: bool,
+    /// The running and queued syncs and imports, in order, then the running loan returns.
+    pub operations: Vec<Operation>,
     /// Whether a sync, import or loan return runs. The books folder cannot change then.
     pub job_running: bool,
     pub can_sync_all: bool,
@@ -91,6 +104,28 @@ pub struct Status {
     pub banner: Vec<String>,
     /// The effective books folder.
     pub books_dir: Option<String>,
+}
+
+/// What an operation does, and what identifies it for cancelling.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OperationKind {
+    /// A sync of the row with `key`; `App::cancel` takes the key.
+    Sync { key: String },
+    /// An import of the ACSM file at `path`; `App::cancel_import` takes the path.
+    Import { path: String },
+    /// A loan return of the row with `key`. It cannot be cancelled.
+    Return { key: String },
+}
+
+/// A running or queued operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Operation {
+    pub kind: OperationKind,
+    /// The book title, or the file name of an import.
+    pub label: String,
+    pub running: bool,
+    /// Whether cancelling still has an effect.
+    pub cancellable: bool,
 }
 
 /// A sign-in provider.
@@ -138,6 +173,11 @@ pub enum Event {
     },
     Providers {
         result: Result<Vec<Provider>, String>,
+    },
+    /// Work finished, such as a refresh or the sync queue running empty. A UI shows it
+    /// briefly, as a toast.
+    Notice {
+        message: String,
     },
 }
 

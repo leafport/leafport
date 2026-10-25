@@ -56,7 +56,8 @@ fn metadata(resource: &str, title: &str) -> Metadata {
         format: "application/epub+zip".into(),
         fulfillment: None,
         source: Source::Cloud,
-        synced_at: "2026-10-19T10:00:00Z".into(),
+        synced_at: Some("2026-10-19T10:00:00Z".into()),
+        excluded: false,
         returned: false,
         loan: None,
     }
@@ -135,12 +136,10 @@ fn merge_assigns_each_state() {
     });
     let mut c = metadata("urn:uuid:c", "C");
     c.returned = true;
-    let locals = [
-        local("urn:uuid:a", "A"),
-        local_with(b),
-        local_with(c),
-        local("urn:uuid:e", "E"),
-    ];
+    // A's folder holds the book; only then is it synced.
+    let mut a = local("urn:uuid:a", "A");
+    a.publication = Some(a.folder.join("A.epub"));
+    let locals = [a, local_with(b), local_with(c), local("urn:uuid:e", "E")];
     let rows = merge(&cloud, &locals);
     let state = |t: &str| rows.iter().find(|r| r.title == t).unwrap().clone();
     assert_eq!(state("A").state, ItemState::Synced);

@@ -36,7 +36,8 @@ fn sample_metadata() -> Metadata {
         format: "application/pdf".into(),
         fulfillment: Some("ff-1".into()),
         source: Source::Cloud,
-        synced_at: "2026-10-19T10:00:00Z".into(),
+        synced_at: Some("2026-10-19T10:00:00Z".into()),
+        excluded: false,
         returned: false,
         loan: None,
     }

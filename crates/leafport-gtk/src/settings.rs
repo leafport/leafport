@@ -1,14 +1,12 @@
-//! Preferences: the books folder and the theme.
+//! Preferences: the books folder. The color scheme follows the system.
 
-use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use leafport_app::{AppError, Settings, Status, Theme};
+use leafport_app::{AppError, Settings, Status};
 
-use crate::color_scheme;
 use crate::window::Window;
 
 /// The chosen folder as settings text, or the message shown under the folder row.
@@ -22,12 +20,6 @@ pub fn folder_choice(path: &Path) -> Result<String, String> {
     })
 }
 
-const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
-
-fn theme_index(theme: &Theme) -> u32 {
-    THEMES.iter().position(|t| t == theme).unwrap_or(0) as u32
-}
-
 /// The preferences dialog and the widgets that follow the settings and the status.
 pub struct PreferencesDialog {
     dialog: adw::PreferencesDialog,
@@ -35,9 +27,6 @@ pub struct PreferencesDialog {
     folder: adw::ActionRow,
     choose: gtk::Button,
     error: adw::ActionRow,
-    theme: adw::ComboRow,
-    /// Set while `update` changes widgets, so their handlers stay quiet.
-    updating: Cell<bool>,
 }
 
 /// Show the preferences over `window`.
@@ -56,7 +45,6 @@ pub fn present(window: &Rc<Window>) {
 impl PreferencesDialog {
     /// Follow the settings in effect and the app status.
     pub fn update(&self, settings: &Settings, status: &Status) {
-        self.updating.set(true);
         let shown = settings
             .books_dir
             .as_deref()
@@ -69,8 +57,6 @@ impl PreferencesDialog {
             description.push_str("\nThe books folder can change once the running sync finishes.");
         }
         self.group.set_description(Some(&description));
-        self.theme.set_selected(theme_index(&settings.theme));
-        self.updating.set(false);
     }
 
     fn show_error(&self, message: Option<&str>) {
@@ -96,16 +82,9 @@ impl PreferencesDialog {
             .build();
         error.add_css_class("error");
 
-        let names = gtk::StringList::new(&["System", "Light", "Dark"]);
-        let theme = adw::ComboRow::builder()
-            .title("Theme")
-            .model(&names)
-            .build();
-
         let group = adw::PreferencesGroup::new();
         group.add(&folder);
         group.add(&error);
-        group.add(&theme);
         let page = adw::PreferencesPage::new();
         page.add(&group);
         let dialog = adw::PreferencesDialog::new();
@@ -117,8 +96,6 @@ impl PreferencesDialog {
             folder,
             choose,
             error,
-            theme,
-            updating: Cell::new(false),
         })
     }
 
@@ -165,28 +142,6 @@ impl PreferencesDialog {
                 );
             }
         ));
-        self.theme.connect_selected_notify(glib::clone!(
-            #[strong]
-            win,
-            #[strong]
-            this,
-            move |row| {
-                let (Some(win), Some(this)) = (win.upgrade(), this.upgrade()) else {
-                    return;
-                };
-                if this.updating.get() {
-                    return;
-                }
-                let Some(theme) = THEMES.get(row.selected() as usize) else {
-                    return;
-                };
-                let mut new = win.settings();
-                if new.theme != *theme {
-                    new.theme = theme.clone();
-                    commit(&win, new);
-                }
-            }
-        ));
         self.dialog.connect_closed(glib::clone!(
             #[strong]
             win,
@@ -203,10 +158,7 @@ impl PreferencesDialog {
 /// apply; a busy app keeps the settings in effect and says so.
 fn commit(window: &Rc<Window>, new: Settings) {
     match window.core().set_settings(new.clone()) {
-        Ok(()) | Err(AppError::Save { .. }) => {
-            adw::StyleManager::default().set_color_scheme(color_scheme(&new.theme));
-            window.set_settings(new);
-        }
+        Ok(()) | Err(AppError::Save { .. }) => window.set_settings(new),
         Err(AppError::Busy) => {
             window
                 .core()

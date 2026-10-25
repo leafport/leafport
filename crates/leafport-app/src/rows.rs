@@ -86,13 +86,23 @@ pub(crate) fn row(item: &Item, busy: &Busy) -> Row {
         }
         if item.folder.is_some() {
             menu.push(MenuAction::ShowInFolder);
-            menu.push(MenuAction::RemoveFromDisk);
+        }
+        // Only a title Sync All would fetch can be excluded.
+        match item.state {
+            ItemState::Excluded => menu.push(MenuAction::Include),
+            ItemState::Available | ItemState::Failed(_)
+                if item.publication.is_none() && item.acsm.is_some() =>
+            {
+                menu.push(MenuAction::Exclude)
+            }
+            _ => {}
         }
         menu
     };
 
     let primary = match (&item.publication, &item.state) {
         (Some(_), _) => Some(Primary::Open),
+        (None, ItemState::Excluded) => None,
         (None, _) if item.acsm.is_none() => None,
         (None, ItemState::Failed(_)) => Some(Primary::Retry),
         (None, _) => Some(Primary::Sync),
@@ -104,6 +114,7 @@ pub(crate) fn row(item: &Item, busy: &Busy) -> Row {
         ItemState::OnLoan { expires } => (RowState::OnLoan, expires.clone(), None),
         ItemState::Returned => (RowState::Returned, None, None),
         ItemState::Local => (RowState::Local, None, None),
+        ItemState::Excluded => (RowState::Excluded, None, None),
         ItemState::Failed(message) => (RowState::Failed, None, Some(message.clone())),
     };
 
@@ -140,10 +151,12 @@ pub(crate) struct StatusInputs<'a> {
 pub(crate) fn status(inputs: &StatusInputs) -> Status {
     Status {
         user: inputs.user.map(str::to_owned),
+        username: None,
+        provider: None,
         signing_in: false,
         loading_providers: false,
         refreshing: inputs.refreshing,
-        importing: false,
+        operations: Vec::new(),
         job_running: false,
         can_sync_all: false,
         can_cancel_all: false,
@@ -234,7 +247,7 @@ mod tests {
     fn available_with_acsm_offers_sync() {
         let r = Env::new().row(&item(ItemState::Available), None, false);
         assert_eq!(r.primary, Some(Primary::Sync));
-        assert!(r.menu.is_empty());
+        assert_eq!(r.menu, [MenuAction::Exclude]);
         assert_eq!(r.activity, Activity::Idle);
         assert_eq!(r.format, "EPUB");
     }
@@ -273,14 +286,7 @@ mod tests {
     fn synced_offers_open_and_menu() {
         let r = Env::new().row(&synced(), None, false);
         assert_eq!(r.primary, Some(Primary::Open));
-        assert_eq!(
-            r.menu,
-            [
-                MenuAction::SyncAgain,
-                MenuAction::ShowInFolder,
-                MenuAction::RemoveFromDisk
-            ]
-        );
+        assert_eq!(r.menu, [MenuAction::SyncAgain, MenuAction::ShowInFolder]);
         assert_eq!(r.publication.as_deref(), Some("/b/t/book.epub"));
         assert_eq!(r.folder.as_deref(), Some("/b/t"));
     }
@@ -304,7 +310,8 @@ mod tests {
             format: "epub".into(),
             fulfillment: None,
             source: Source::Import,
-            synced_at: "2026-10-01T00:00:00Z".into(),
+            synced_at: Some("2026-10-01T00:00:00Z".into()),
+            excluded: false,
             returned: false,
             loan: Some(Loan {
                 operator_url: "https://op".into(),
