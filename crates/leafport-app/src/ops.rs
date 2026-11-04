@@ -27,6 +27,17 @@ impl Paths {
     }
 }
 
+/// The signed-in account, as the credential store has it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Account {
+    /// The account ID returned by sign-in.
+    pub id: String,
+    /// The name the user signed in with.
+    pub username: Option<String>,
+    /// The sign-in provider's method ID.
+    pub method: Option<String>,
+}
+
 /// Callbacks a running sync reports through.
 pub struct SyncHooks<'a> {
     /// Download progress in whole percents, as a fraction in `0.0..=1.0`.
@@ -37,13 +48,13 @@ pub struct SyncHooks<'a> {
 
 /// Operations with side effects. The app calls them on worker threads; each may block.
 pub trait Ops: Send + Sync + 'static {
-    /// The activated account label from the credential store, when signed in.
-    fn signed_in_user(&self) -> Result<Option<String>, String>;
+    /// The activated account from the credential store, when signed in.
+    fn signed_in_user(&self) -> Result<Option<Account>, String>;
 
     /// The sign-in provider catalog.
     fn load_providers(&self) -> Result<VendorCatalog, String>;
 
-    /// Sign in with `method` from `catalog`; returns the activated account label. The
+    /// Sign in with `method` from `catalog`; returns the activated account. The
     /// password is wiped from memory when dropped.
     fn sign_in(
         &self,
@@ -51,7 +62,7 @@ pub trait Ops: Send + Sync + 'static {
         method: &str,
         username: String,
         password: Zeroizing<String>,
-    ) -> Result<String, String>;
+    ) -> Result<Account, String>;
 
     /// Forget the stored activation.
     fn sign_out(&self) -> Result<(), String>;

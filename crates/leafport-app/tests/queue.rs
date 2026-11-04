@@ -76,6 +76,9 @@ fn start_with(user: Option<&str>, cached: &[(&str, &str)], prepare: impl Fn(&Pat
     let (ops, script) = FakeOps::new(user);
     let recorder = Recorder::new();
     let app = App::with_ops(ops.clone(), paths, Box::new(recorder.clone()));
+    if user.is_some() {
+        recorder.settle_startup();
+    }
     Setup {
         dir,
         app,
@@ -243,7 +246,7 @@ fn cancel_all_keeps_import() {
     assert!(!s.app.snapshot().status.can_cancel_all);
     let outcome = write_book(&s.books(), "urn:uuid:9", "Imported");
     s.script.import.send(Ok(outcome)).unwrap();
-    s.wait_status(|st| !st.importing && !st.job_running);
+    s.wait_status(|st| !importing(st) && !st.job_running);
     assert!(s.app.snapshot().status.banner.is_empty());
     s.script.no_call_within(200);
 }
@@ -278,11 +281,11 @@ fn import_reports_warning_and_errors() {
 
     s.app.import_acsm(path_string.clone());
     assert_eq!(s.script.next_call(), Call::Import(path.clone()));
-    s.wait_status(|st| st.importing && st.job_running);
+    s.wait_status(|st| importing(st) && st.job_running);
     let mut outcome = write_book(&s.books(), "urn:uuid:9", "Imported");
     outcome.warning = Some("upload failed".into());
     s.script.import.send(Ok(outcome)).unwrap();
-    s.wait_status(|st| !st.importing);
+    s.wait_status(|st| !importing(st));
     assert_eq!(s.app.snapshot().status.banner, ["upload failed"]);
 
     s.app.import_acsm(path_string);
@@ -318,4 +321,11 @@ fn import_accepts_an_acsm_that_is_not_utf8() {
     std::fs::write(&path, bytes).unwrap();
     s.app.import_acsm(path.to_string_lossy().into_owned());
     assert_eq!(s.script.next_call(), Call::Import(path));
+}
+
+/// Whether an import runs.
+fn importing(status: &leafport_app::Status) -> bool {
+    status.operations.iter().any(|operation| {
+        operation.running && matches!(operation.kind, leafport_app::OperationKind::Import { .. })
+    })
 }

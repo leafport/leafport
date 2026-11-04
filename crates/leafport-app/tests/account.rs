@@ -87,6 +87,9 @@ fn start_with(user: Option<&str>, cached: &[(&str, &str)], prepare: impl Fn(&Pat
     let (ops, script) = FakeOps::new(user);
     let recorder = Recorder::new();
     let app = App::with_ops(ops, paths, Box::new(recorder.clone()));
+    if user.is_some() {
+        recorder.settle_startup();
+    }
     Setup {
         dir,
         app,

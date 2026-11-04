@@ -19,6 +19,9 @@ fn start(user: Option<&str>, cached: &[(&str, &str)]) -> (TempDir, Arc<App>, Scr
     let (ops, script) = FakeOps::new(user);
     let recorder = Recorder::new();
     let app = App::with_ops(ops, paths, Box::new(recorder.clone()));
+    if user.is_some() {
+        recorder.settle_startup();
+    }
     (dir, app, script, recorder)
 }
 
@@ -150,6 +153,7 @@ fn listener_may_call_snapshot() {
     };
     let app = App::with_ops(ops, paths, Box::new(listener));
     cell.set(Arc::downgrade(&app)).unwrap();
+    recorder.settle_startup();
     refresh_to_a_b(&app, &script, &recorder);
 }
 
@@ -214,6 +218,7 @@ fn loan_app() -> (
     let (ops, script) = FakeOps::new(Some("user@x"));
     let recorder = Recorder::new();
     let app = App::with_ops(ops, paths, Box::new(recorder.clone()));
+    recorder.settle_startup();
     (dir, app, script, recorder, folder, metadata)
 }
 
@@ -231,74 +236,12 @@ fn return_loan_error_keeps_loan() {
 }
 
 #[test]
-fn remove_deletes_folder_cloud_row_stays() {
-    let dir = tempdir();
-    let paths = settings_in(dir.path());
-    std::fs::write(paths.cache.as_ref().unwrap(), cache_xml(&[(K, "A")])).unwrap();
-    let folder = write_book(&dir.path().join("Books"), K, "A").folder;
-    let (ops, _script) = FakeOps::new(Some("user@x"));
-    let recorder = Recorder::new();
-    let app = App::with_ops(ops, paths, Box::new(recorder.clone()));
-    assert_eq!(row_of(&app, K).unwrap().state, RowState::Synced);
-    app.remove(K.into(), false);
-    recorder.wait_for(|_| row_of(&app, K).is_some_and(|r| r.state == RowState::Available));
-    assert!(!folder.exists());
-}
-
-#[test]
-fn remove_deletes_folder_local_row_disappears() {
-    let dir = tempdir();
-    let paths = settings_in(dir.path());
-    let folder = write_book(&dir.path().join("Books"), K, "A").folder;
-    let (ops, _script) = FakeOps::new(Some("user@x"));
-    let recorder = Recorder::new();
-    let app = App::with_ops(ops, paths, Box::new(recorder.clone()));
-    assert_eq!(row_of(&app, K).unwrap().state, RowState::Local);
-    app.remove(K.into(), false);
-    recorder.wait_for(|_| row_of(&app, K).is_none());
-    assert!(!folder.exists());
-}
-
-#[test]
-fn remove_loaned_returns_first() {
-    let (_dir, app, script, recorder, folder, metadata) = loan_app();
-    app.remove(K.into(), true);
-    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
-    // A second request while the return runs only keeps the mark.
-    app.remove(K.into(), true);
-    script.no_call_within(200);
-    assert!(folder.exists());
-    let done = returned(&folder, metadata);
-    script.return_loan.send(Ok(done)).unwrap();
-    recorder.wait_for(|_| row_of(&app, K).is_some_and(|r| r.state == RowState::Available));
-    assert!(!folder.exists());
-}
-
-#[test]
-fn remove_loaned_return_error_keeps_folder() {
-    let (_dir, app, script, recorder, folder, _m) = loan_app();
-    app.remove(K.into(), true);
-    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
-    assert!(folder.exists());
-    script.return_loan.send(Err("denied".into())).unwrap();
-    recorder.wait_for(|_| row_of(&app, K).unwrap().error.is_some());
-    assert!(folder.exists());
-    assert_eq!(row_of(&app, K).unwrap().error.as_deref(), Some("denied"));
-    // The mark is gone: a later plain return does not delete the folder.
-    app.return_loan(K.into());
-    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
-    script.return_loan.send(Err("again".into())).unwrap();
-    recorder.wait_for(|_| row_of(&app, K).unwrap().error.as_deref() == Some("again"));
-    assert!(folder.exists());
-}
-
-#[test]
 fn unknown_key_ignored() {
     let (_dir, app, script, recorder) = start(Some("user@x"), &[(K, "A")]);
     let before = app.snapshot();
     app.return_loan("nope".into());
-    app.remove("nope".into(), false);
-    app.remove("nope".into(), true);
+    app.set_excluded("nope".into(), true);
+    app.set_excluded("nope".into(), false);
     script.no_call_within(200);
     assert!(recorder.events().is_empty());
     assert_eq!(app.snapshot(), before);
@@ -409,39 +352,6 @@ fn settings_busy_during_return() {
         .send(Ok(returned(&folder, metadata)))
         .unwrap();
     recorder.wait_for(|_| !app.snapshot().status.job_running);
-}
-
-#[test]
-fn remove_after_return_deletes_only_captured_folder() {
-    let (dir, app, script, recorder, folder, metadata) = loan_app();
-    app.remove(K.into(), true);
-    assert_eq!(script.next_call(), Call::ReturnLoan(K.into()));
-    // While the return runs, the title folder moves and a rescan picks up its new place.
-    let moved = dir.path().join("Books").join("A2");
-    std::fs::rename(&folder, &moved).unwrap();
-    app.import_acsm(
-        dir.path()
-            .join("missing.acsm")
-            .to_string_lossy()
-            .into_owned(),
-    );
-    recorder.wait_for(|_| {
-        let snapshot = app.snapshot();
-        snapshot
-            .status
-            .banner
-            .iter()
-            .any(|m| m.starts_with("Import failed: "))
-            && snapshot.rows.iter().any(|r| {
-                r.key == K && r.folder.as_deref() == Some(moved.to_string_lossy().as_ref())
-            })
-    });
-    let done = returned(&moved, metadata);
-    script.return_loan.send(Ok(done)).unwrap();
-    recorder.wait_for(|_| {
-        row_of(&app, K).is_some_and(|r| r.activity == Activity::Idle && r.state != RowState::OnLoan)
-    });
-    assert!(moved.exists(), "a folder the user did not confirm stays");
 }
 
 /// Panics on its first event, then forwards to a recorder.

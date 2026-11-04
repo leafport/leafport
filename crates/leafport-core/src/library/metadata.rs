@@ -34,9 +34,15 @@ pub struct Metadata {
     #[serde(default)]
     pub fulfillment: Option<String>,
     pub source: Source,
-    pub synced_at: String,
+    /// When the book file was last written; `None` for a folder that only holds an
+    /// excluded title's ACSM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_at: Option<String>,
     #[serde(default)]
     pub returned: bool,
+    /// Whether Sync All skips this title. Always written, `false` unless excluded.
+    #[serde(default)]
+    pub excluded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loan: Option<Loan>,
 }

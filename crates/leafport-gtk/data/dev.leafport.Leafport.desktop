@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Leafport
+Exec=leafport-gtk %F
+Type=Application
+Categories=Office;Viewer;
+MimeType=application/vnd.adobe.adept+xml;
+Icon=dev.leafport.Leafport
+StartupNotify=true

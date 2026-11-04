@@ -96,6 +96,44 @@ impl Library {
         Ok(outcome)
     }
 
+    /// Mark `item` excluded from Sync All, or include it again. Excluding a title without
+    /// a folder writes one holding its ACSM and `metadata.yaml`; nothing is deleted.
+    pub fn set_excluded(&self, item: &Item, excluded: bool) -> Result<(), LibraryError> {
+        if let (Some(folder), Some(metadata)) = (&item.folder, &item.metadata) {
+            let mut metadata = metadata.clone();
+            metadata.excluded = excluded;
+            return metadata.write(folder);
+        }
+        if !excluded {
+            return Ok(());
+        }
+        let acsm = item
+            .acsm
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("no ACSM for this title"))?;
+        let stem = folder_name(&item.title);
+        let folder = self.title_folder(&stem, &item.key)?;
+        let metadata = Metadata {
+            resource: item.key.clone(),
+            title: item.title.clone(),
+            author: item.author.clone(),
+            format: item.format.mime().to_owned(),
+            fulfillment: None,
+            source: Source::Cloud,
+            synced_at: None,
+            returned: false,
+            excluded: true,
+            loan: None,
+        };
+        let write = |temp: &Path| -> Result<(), LibraryError> {
+            write_atomic(&temp.join(format!("{stem}.acsm")), acsm)?;
+            metadata.write(temp)
+        };
+        stage_folder(&self.root, &folder, write, &|from, to| {
+            std::fs::rename(from, to)
+        })
+    }
+
     /// The folder for `key`: a scanned folder holding it, else `<stem> [<id>]`, else
     /// `<stem> [<full id>]` when the short name holds another resource.
     fn title_folder(&self, stem: &str, key: &str) -> Result<PathBuf, LibraryError> {
@@ -219,8 +257,9 @@ impl Library {
                 format: format.mime().to_owned(),
                 fulfillment: f.fulfillment_id.clone(),
                 source,
-                synced_at: now_rfc3339(),
+                synced_at: Some(now_rfc3339()),
                 returned: false,
+                excluded: false,
                 loan,
             };
             metadata.write(temp)?;

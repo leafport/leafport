@@ -96,8 +96,10 @@ pub enum Action {
     Open(PathBuf),
     /// Open this title folder in the file manager.
     ShowInFolder(PathBuf),
-    /// Ask to remove the title folder of the row with this key.
-    Remove(String),
+    /// Exclude the row with this key from Sync all.
+    Exclude(String),
+    /// Include the row with this key in Sync all again.
+    Include(String),
     /// Cancel the queued or running sync of the row with this key.
     Cancel(String),
 }
@@ -124,6 +126,7 @@ fn state_label(state: &RowState) -> &'static str {
         RowState::OnLoan => "On loan",
         RowState::Returned => "Returned",
         RowState::Local => "Local",
+        RowState::Excluded => "Excluded",
         RowState::Failed => "Failed",
     }
 }
@@ -313,9 +316,14 @@ fn action(ui: &mut egui::Ui, row: &Row, progress: Option<f32>) -> Option<Action>
                             clicked = Some(Action::ShowInFolder(PathBuf::from(folder)));
                         }
                     }
-                    MenuAction::RemoveFromDisk => {
-                        if ui.button("Remove from disk…").clicked() {
-                            clicked = Some(Action::Remove(key()));
+                    MenuAction::Exclude => {
+                        if ui.button("Exclude from sync").clicked() {
+                            clicked = Some(Action::Exclude(key()));
+                        }
+                    }
+                    MenuAction::Include => {
+                        if ui.button("Include in sync").clicked() {
+                            clicked = Some(Action::Include(key()));
                         }
                     }
                 }
@@ -323,6 +331,10 @@ fn action(ui: &mut egui::Ui, row: &Row, progress: Option<f32>) -> Option<Action>
         });
     });
 
+    // An excluded title has nothing to sync; its menu lifts the exclusion.
+    if row.state == RowState::Excluded && row.primary.is_none() {
+        return clicked;
+    }
     let (label, main) = match &row.primary {
         Some(Primary::Open) => (
             "Open",

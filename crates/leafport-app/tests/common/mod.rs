@@ -5,14 +5,14 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use leafport_app::{Event, Listener, Ops, Paths, Status, SyncHooks};
+use leafport_app::{Account, Event, Listener, Ops, Paths, Status, SyncHooks};
 use leafport_core::cloud::DownloadRecord;
 use leafport_core::library::{
     Item, Library, Metadata, Settings, Source, SyncOutcome, acsm_summary,
@@ -107,7 +107,8 @@ pub fn write_book(books: &Path, resource: &str, title: &str) -> SyncOutcome {
         format: "application/epub+zip".into(),
         fulfillment: None,
         source: Source::Cloud,
-        synced_at: "2026-10-23T10:00:00Z".into(),
+        synced_at: Some("2026-10-23T10:00:00Z".into()),
+        excluded: false,
         returned: false,
         loan: None,
     };
@@ -132,6 +133,18 @@ impl Recorder {
     /// Every event received so far.
     pub fn events(&self) -> Vec<Event> {
         self.0.0.lock().unwrap().clone()
+    }
+
+    /// Wait until the app has applied the provider load a signed-in app starts with,
+    /// then forget the events so far, so a test sees only the events it causes.
+    pub fn settle_startup(&self) {
+        self.wait_for(|events| {
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Providers { .. }))
+                && last_status(events).is_some_and(|status| !status.loading_providers)
+        });
+        self.0.0.lock().unwrap().clear();
     }
 
     /// Block until `pred` holds for the events received so far. Panics after 5 s.
@@ -216,6 +229,8 @@ pub struct FakeOps {
     return_loan: Mutex<Receiver<Result<Metadata, String>>>,
     /// The cancel token of the most recent sync.
     token: Mutex<Option<CancelToken>>,
+    /// Whether the provider load a signed-in app starts with is still to come.
+    startup_load: AtomicBool,
 }
 
 /// The test side of a `FakeOps`: the calls it saw and the replies to send.
@@ -261,6 +276,7 @@ impl FakeOps {
         let (import, import_rx) = mpsc::channel();
         let (return_loan, return_loan_rx) = mpsc::channel();
         let ops = FakeOps {
+            startup_load: AtomicBool::new(matches!(user, Ok(Some(_)))),
             user,
             calls: Mutex::new(calls_tx),
             providers: Mutex::new(providers_rx),
@@ -309,12 +325,26 @@ fn reply<T>(
         .unwrap_or_else(|_| Err(CLOSED.into()))
 }
 
+/// An account with only an ID, as the fake reports it.
+fn account(id: String) -> Account {
+    Account {
+        id,
+        username: None,
+        method: None,
+    }
+}
+
 impl Ops for FakeOps {
-    fn signed_in_user(&self) -> Result<Option<String>, String> {
-        self.user.clone()
+    fn signed_in_user(&self) -> Result<Option<Account>, String> {
+        self.user.clone().map(|user| user.map(account))
     }
 
     fn load_providers(&self) -> Result<VendorCatalog, String> {
+        // A signed-in app loads the providers at startup. That load gets the built-in
+        // providers without a call, so tests script only the loads they start.
+        if self.startup_load.swap(false, Ordering::SeqCst) {
+            return Ok(VendorCatalog::new());
+        }
         reply(self, Call::LoadProviders, &self.providers)
     }
 
@@ -324,12 +354,12 @@ impl Ops for FakeOps {
         method: &str,
         username: String,
         _password: zeroize::Zeroizing<String>,
-    ) -> Result<String, String> {
+    ) -> Result<Account, String> {
         let call = Call::SignIn {
             method: method.into(),
             username,
         };
-        reply(self, call, &self.sign_in)
+        reply(self, call, &self.sign_in).map(account)
     }
 
     fn sign_out(&self) -> Result<(), String> {

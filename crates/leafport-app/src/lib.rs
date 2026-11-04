@@ -2,6 +2,7 @@
 
 mod diff;
 mod live;
+mod notice;
 mod ops;
 mod rows;
 mod state;
@@ -10,10 +11,10 @@ mod types;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
-pub use ops::{Ops, Paths, SyncHooks};
+pub use ops::{Account, Ops, Paths, SyncHooks};
 pub use types::{
-    Activity, AppError, Event, Listener, MenuAction, Primary, Provider, Row, RowState, Settings,
-    Snapshot, Status, Theme,
+    Activity, AppError, Event, Listener, MenuAction, Operation, OperationKind, Primary, Provider,
+    Row, RowState, Settings, Snapshot, Status, Theme,
 };
 
 use live::LiveOps;
@@ -36,7 +37,9 @@ impl App {
     /// Load the settings, books folder, cloud list cache and account through `ops`, and
     /// start the reactor thread that reports changes to `listener`.
     pub fn with_ops(ops: Arc<dyn Ops>, paths: Paths, listener: Box<dyn Listener>) -> Arc<App> {
-        let state = Arc::new(Mutex::new(State::load(ops.as_ref(), paths)));
+        let state = State::load(ops.as_ref(), paths);
+        let signed_in = state.account.is_some();
+        let state = Arc::new(Mutex::new(state));
         let (tx, rx) = mpsc::channel();
         let tx = Arc::new(tx);
         let reactor = Reactor {
@@ -49,7 +52,12 @@ impl App {
             .name("leafport-reactor".into())
             .spawn(move || reactor.run(rx))
             .expect("spawn the reactor thread");
-        Arc::new(App { state, tx })
+        let app = Arc::new(App { state, tx });
+        // The provider list names the signed-in account's provider.
+        if signed_in {
+            app.load_providers();
+        }
+        app
     }
 
     /// The rows and status last sent to the listener, and the settings.
@@ -68,7 +76,8 @@ impl App {
         self.send(Msg::Sync(key));
     }
 
-    /// Queue every Available or Failed row that has an ACSM and no book file yet.
+    /// Queue every Available or Failed row that has an ACSM and no book file yet. Excluded
+    /// rows are skipped.
     pub fn sync_all(&self) {
         self.send(Msg::SyncAll);
     }
@@ -85,6 +94,12 @@ impl App {
         self.send(Msg::CancelAll);
     }
 
+    /// Drop the queued import of the ACSM file at `path`. A running import cannot be
+    /// cancelled.
+    pub fn cancel_import(&self, path: String) {
+        self.send(Msg::CancelImport(path));
+    }
+
     /// Queue an import of the ACSM file at `path`. Signed out, the banner asks to sign in.
     pub fn import_acsm(&self, path: String) {
         self.send(Msg::Import(path.into()));
@@ -95,14 +110,11 @@ impl App {
         self.send(Msg::ReturnLoan(key));
     }
 
-    /// Delete the title folder of the row with `key`; the book stays in the cloud list.
-    /// With `return_loan_first` the loan is returned first and the folder is deleted only
-    /// once that succeeds. The UI asks for confirmation before calling this.
-    pub fn remove(&self, key: String, return_loan_first: bool) {
-        self.send(Msg::Remove {
-            key,
-            return_loan_first,
-        });
+    /// Exclude the row with `key` from Sync All, or include it again. The mark is kept
+    /// in its title folder, which excluding creates when needed. Excluding also drops a
+    /// queued sync of it; a running sync is left alone and the call does nothing.
+    pub fn set_excluded(&self, key: String, excluded: bool) {
+        self.send(Msg::SetExcluded { key, excluded });
     }
 
     /// Save `settings` and, when the books folder changed, open the new one. Applying the

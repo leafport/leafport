@@ -16,23 +16,20 @@ The live command successfully loaded 42 choices on 2026-10-17, including Adobe I
 ## Native desktop
 
 ```sh
-cargo run -p leafport-desktop
-# Optional: open a local EPUB on launch
-cargo run -p leafport-desktop -- /path/to/book.epub
+# Linux (GTK 4 and libadwaita)
+cargo run -p leafport-gtk
+# Optional: import an ACSM file on launch
+cargo run -p leafport-gtk -- /path/to/file.acsm
 ```
 
-The eframe/egui frontend uses native windows. Use **Import EPUB…**, drag a file into the window, or pass a path on launch. The library remembers links to original files using the platform application-data directory; it does not copy books. Removing an entry leaves the original file intact. EPUB metadata, spine order, EPUB 2/3 navigation labels, selectable text, chapter controls, and text size are supported. The file dialog uses platform-native services (an XDG desktop portal on Linux).
+On Linux the app is `leafport-gtk`, a GTK4 and libadwaita front end. Building it needs a C toolchain and the GTK 4.10 and libadwaita 1.5 development packages (`gtk4` and `libadwaita` on Arch, `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu).
 
-The **Providers** window loads the real service asynchronously and displays each choice's method and node ID. A failed refresh preserves existing choices and reports the error. There is no simulated login, fulfillment, or sync action.
+`leafport-desktop` is the egui front end. It builds on macOS and Windows only, and is their UI until native apps exist. On Linux it prints a pointer to `leafport-gtk` and exits. The macOS and Windows builds have not been built or run.
 
-Reader limitations: text only, no images/CSS layout, PDF, annotations, bookmarks, or protected-book rendering. EPUBs declaring rights/encryption metadata are conservatively marked unreadable, including font-obfuscated publications. Library links persist; reading position does not yet persist. Linux builds need a C toolchain and working Wayland/X11/OpenGL desktop. macOS and Windows support is intended through portable dependencies but has not been built or run on those platforms.
+Both front ends show the library list from your account, with a cover, sync status and a button per book. They sign in and out, sync one book or all of them, cancel a queued or running sync or import, return a loan, and exclude a book from Sync All. An exclusion is stored as `excluded: true` in the book's `metadata.yaml`; excluding a book that was never synced writes its folder with the ACSM and metadata only. Leafport never deletes book folders. They import an ACSM file through the menu (Ctrl+O on Linux) or from the launch argument; on Linux, a second launch with an ACSM file hands it to the running window. The settings set the books folder; the egui app also sets the theme, while the GTK app follows the system style.
 
 ## Roadmap
 
-- **Sign-in:** sign in with an Adobe ID or a library provider from the app, and keep the activation in the operating system's credential store.
-- **Cloud sync:** download the account's ACSM list and fulfill each book, and upload newly imported ACSMs so other devices see them.
-- **Books folder:** one folder per title with the book, its ACSM and its metadata, so syncing again skips what is already there.
-- **Readable books:** save decrypted EPUB and PDF files that any reader opens.
-- **Loans:** record loans so they can be returned early.
-- **Clear errors:** describe service error codes in plain words, and count a sync as done only once its book is written.
 - **Releases:** packages for Linux, macOS and Windows, each built and run on its platform before a release.
+- **macOS and Windows builds:** the egui app has not been built or run on either platform yet.
+- **Live verification:** verify fulfillment with more stores and libraries.

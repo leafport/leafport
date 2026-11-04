@@ -67,6 +67,30 @@ pub fn account_license_key(credentials_xml: &str, device_key: &[u8; 16]) -> Opti
     key
 }
 
+/// The sign-in method and the name the user signed in with, from the `adept:username`
+/// element of a SignInDirect credential record. None when it is missing.
+pub fn account_username(credentials_xml: &str) -> Option<(Option<String>, String)> {
+    let document = roxmltree::Document::parse_with_options(
+        credentials_xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: 50_000,
+            entity_resolver: None,
+        },
+    )
+    .ok()?;
+    let node = document
+        .descendants()
+        .find(|node| node.has_tag_name((ADEPT_NS, "username")))?;
+    let username = node.text()?.trim();
+    (!username.is_empty()).then(|| {
+        (
+            node.attribute("method").map(str::to_owned),
+            username.to_owned(),
+        )
+    })
+}
+
 /// The account's signing key from a SignInDirect response. ADEPT request signatures
 /// are verified against the key in the returned `pkcs12`, whose password is the
 /// Base64 device key (libgourou `signNode`); the license key is rejected with

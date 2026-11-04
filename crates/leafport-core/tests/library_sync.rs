@@ -487,7 +487,8 @@ fn foreign_folder(root: &Path, name: &str, resource: &str) -> PathBuf {
         format: "application/epub+zip".into(),
         fulfillment: None,
         source: Source::Cloud,
-        synced_at: "2026-10-19T10:00:00Z".into(),
+        synced_at: Some("2026-10-19T10:00:00Z".into()),
+        excluded: false,
         returned: false,
         loan: None,
     }
