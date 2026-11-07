@@ -159,18 +159,13 @@ impl SignInDialog {
         if self.provider.selected() != account.selected {
             self.provider.set_selected(account.selected);
         }
+        // Only the details the selected provider has are shown.
         let provider = account.provider();
-        self.method
-            .set_subtitle(provider.map_or("", |p| p.method.as_str()));
-        self.node_id.set_subtitle(
-            provider
-                .and_then(|p| p.node_id.as_deref())
-                .unwrap_or("(built-in)"),
-        );
-        self.sign_in_type.set_subtitle(
-            provider
-                .and_then(|p| p.sign_in_type.as_deref())
-                .unwrap_or("(unspecified)"),
+        set_detail(&self.method, provider.map(|p| p.method.as_str()));
+        set_detail(&self.node_id, provider.and_then(|p| p.node_id.as_deref()));
+        set_detail(
+            &self.sign_in_type,
+            provider.and_then(|p| p.sign_in_type.as_deref()),
         );
 
         let signing = status.signing_in;
@@ -390,10 +385,16 @@ fn info_row(title: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(title)
         .use_markup(false)
-        .subtitle_selectable(true)
         .build();
     row.add_css_class("property");
     row
+}
+
+/// Show `value` in `row`, or hide the row when there is none.
+fn set_detail(row: &adw::ActionRow, value: Option<&str>) {
+    let value = value.filter(|value| !value.is_empty());
+    row.set_visible(value.is_some());
+    row.set_subtitle(value.unwrap_or_default());
 }
 
 fn set_spinning(spinner: &gtk::Spinner, spinning: bool) {

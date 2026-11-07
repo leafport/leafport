@@ -142,12 +142,17 @@ impl Account {
                     });
             }
             if let Some(vendor) = self.providers.get(self.provider) {
-                ui.label(format!("Method: {}", vendor.method));
-                ui.label(format!("Node ID: {}", vendor.node_id.as_deref().unwrap_or("(built-in)")));
-                ui.label(format!(
-                    "Sign-in type: {}",
-                    vendor.sign_in_type.as_deref().unwrap_or("(unspecified)")
-                ));
+                // Only the details the selected provider has are shown.
+                let details = [
+                    ("Method", Some(vendor.method.as_str())),
+                    ("Node ID", vendor.node_id.as_deref()),
+                    ("Sign-in type", vendor.sign_in_type.as_deref()),
+                ];
+                for (title, value) in details {
+                    if let Some(value) = value.filter(|value| !value.is_empty()) {
+                        ui.add(egui::Label::new(format!("{title}: {value}")).selectable(false));
+                    }
+                }
             }
             ui.separator();
             let has_certificate = status.sign_in_ready;
