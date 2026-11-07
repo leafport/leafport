@@ -6,7 +6,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 use leafport_app::{MenuAction, Row};
 
-use crate::window::Window;
+use crate::gtk_ui::window::Window;
 
 /// One menu item per entry of `row.menu`, in order, each targeting the row key.
 /// "Show in Folder" is left out when the row has no folder. A disabled "Cancel Sync"

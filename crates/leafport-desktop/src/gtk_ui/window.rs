@@ -8,13 +8,13 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use leafport_app::{App, Event, Row, Settings, Snapshot, Status};
 
-use crate::account::{Account, SignInDialog};
-use crate::covers::Covers;
-use crate::operations::Operations;
-use crate::row_menu;
-use crate::row_widget::RowWidget;
-use crate::settings::PreferencesDialog;
-use crate::store::{RowObject, RowStore};
+use crate::gtk_ui::account::{Account, SignInDialog};
+use crate::gtk_ui::covers::Covers;
+use crate::gtk_ui::operations::Operations;
+use crate::gtk_ui::row_menu;
+use crate::gtk_ui::row_widget::RowWidget;
+use crate::gtk_ui::settings::PreferencesDialog;
+use crate::gtk_ui::store::{RowObject, RowStore};
 
 const SIGNED_OUT_HINT: &str = "Sign in to see the books in your account.";
 const SYNC_ALL: &str = "Sync All";

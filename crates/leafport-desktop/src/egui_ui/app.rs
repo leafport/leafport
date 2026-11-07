@@ -36,9 +36,9 @@ pub struct App {
     rx: Receiver<Event>,
     /// The latest notice and when it arrived; shown for `NOTICE_TIME`.
     notice: Option<(String, std::time::Instant)>,
-    settings_view: crate::settings_view::SettingsView,
-    account: crate::account::Account,
-    covers: crate::list::Covers,
+    settings_view: crate::egui_ui::settings_view::SettingsView,
+    account: crate::egui_ui::account::Account,
+    covers: crate::egui_ui::list::Covers,
 }
 
 /// The startup argument, when it names an ACSM file.
@@ -63,14 +63,14 @@ impl App {
         // The cloud list is refreshed only when the user asks; until then the cache shows.
         let snapshot = core.snapshot();
         cc.egui_ctx
-            .set_theme(crate::settings_view::theme_preference(
+            .set_theme(crate::egui_ui::settings_view::theme_preference(
                 &snapshot.settings.theme,
             ));
         if let Some(path) = startup_acsm() {
             core.import_acsm(path_string(&path));
         }
         Self {
-            account: crate::account::Account::new(&snapshot.status),
+            account: crate::egui_ui::account::Account::new(&snapshot.status),
             core,
             rows: snapshot.rows,
             status: snapshot.status,
@@ -78,8 +78,8 @@ impl App {
             progress: HashMap::new(),
             rx,
             notice: None,
-            settings_view: crate::settings_view::SettingsView::default(),
-            covers: crate::list::Covers::default(),
+            settings_view: crate::egui_ui::settings_view::SettingsView::default(),
+            covers: crate::egui_ui::list::Covers::default(),
         }
     }
 
@@ -147,7 +147,7 @@ impl App {
         match self.core.set_settings(new.clone()) {
             // A failed save is already in the banner; the settings still apply.
             Ok(()) | Err(AppError::Save { .. }) => {
-                ctx.set_theme(crate::settings_view::theme_preference(&new.theme));
+                ctx.set_theme(crate::egui_ui::settings_view::theme_preference(&new.theme));
                 self.settings = new;
             }
             Err(AppError::Busy) => {
@@ -218,7 +218,7 @@ impl App {
         egui::Panel::top("banner").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .add(egui::Button::new(crate::list::close_icon(ui)).small())
+                    .add(egui::Button::new(crate::egui_ui::list::close_icon(ui)).small())
                     .clicked()
                 {
                     // Clear at once; the app confirms with a status update.
@@ -325,20 +325,23 @@ impl eframe::App for App {
                 });
                 ui.separator();
             }
-            clicked = crate::list::show(ui, &self.rows, &self.progress, &mut self.covers);
+            clicked = crate::egui_ui::list::show(ui, &self.rows, &self.progress, &mut self.covers);
         });
         match clicked {
-            Some(crate::list::Action::Sync(key)) => self.core.sync(key),
-            Some(crate::list::Action::Return(key)) => self.core.return_loan(key),
-            Some(crate::list::Action::Open(path) | crate::list::Action::ShowInFolder(path)) => {
-                if let Err(e) = crate::list::open_path(&path) {
+            Some(crate::egui_ui::list::Action::Sync(key)) => self.core.sync(key),
+            Some(crate::egui_ui::list::Action::Return(key)) => self.core.return_loan(key),
+            Some(
+                crate::egui_ui::list::Action::Open(path)
+                | crate::egui_ui::list::Action::ShowInFolder(path),
+            ) => {
+                if let Err(e) = crate::egui_ui::list::open_path(&path) {
                     self.core
                         .add_message(format!("Could not open {}: {e}", path.display()));
                 }
             }
-            Some(crate::list::Action::Exclude(key)) => self.core.set_excluded(key, true),
-            Some(crate::list::Action::Include(key)) => self.core.set_excluded(key, false),
-            Some(crate::list::Action::Cancel(key)) => self.core.cancel(key),
+            Some(crate::egui_ui::list::Action::Exclude(key)) => self.core.set_excluded(key, true),
+            Some(crate::egui_ui::list::Action::Include(key)) => self.core.set_excluded(key, false),
+            Some(crate::egui_ui::list::Action::Cancel(key)) => self.core.cancel(key),
             None => {}
         }
         self.notice(&ctx);
@@ -364,7 +367,7 @@ fn cover_changed(old: &Row, new: &Row) -> bool {
 }
 
 /// Drop the cached cover textures of `row`, so they are read again.
-fn forget_cover(covers: &mut crate::list::Covers, row: &Row) {
+fn forget_cover(covers: &mut crate::egui_ui::list::Covers, row: &Row) {
     for path in [&row.folder, &row.cover_path].into_iter().flatten() {
         covers.forget(Path::new(path));
     }

@@ -5,7 +5,6 @@ members = [
     "crates/leafport-core",
     "crates/leafport-cli",
     "crates/leafport-desktop",
-    "crates/leafport-gtk",
 ]
 
 [workspace.package]

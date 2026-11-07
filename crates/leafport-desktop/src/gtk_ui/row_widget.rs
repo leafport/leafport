@@ -8,9 +8,9 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use leafport_app::{Activity, MenuAction, Primary, Row, RowState};
 
-use crate::covers::Covers;
-use crate::row_menu::menu_model;
-use crate::store::RowObject;
+use crate::gtk_ui::covers::Covers;
+use crate::gtk_ui::row_menu::menu_model;
+use crate::gtk_ui::store::RowObject;
 
 /// Row height, as egui's `ROW_HEIGHT`.
 const ROW_HEIGHT: i32 = 72;

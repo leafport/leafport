@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use leafport_app::{AppError, Settings, Status};
 
-use crate::window::Window;
+use crate::gtk_ui::window::Window;
 
 /// The chosen folder as settings text, or the message shown under the folder row.
 /// Settings carry the folder as text; a lossy copy would name another folder.

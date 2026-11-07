@@ -1,4 +1,4 @@
-//! Leafport for GNOME: a GTK4 and libadwaita front end for `leafport-app`.
+//! The Linux front end: GTK 4 and libadwaita over `leafport-app`.
 
 mod account;
 mod covers;
@@ -17,9 +17,9 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use leafport_app::{App, Event, Listener};
 
-use crate::window::Window;
+use crate::gtk_ui::window::Window;
 
-pub const APP_ID: &str = "dev.leafport.Leafport";
+const APP_ID: &str = "dev.leafport.Leafport";
 
 /// Hands app events from the reactor thread to the main loop.
 struct Forward {
@@ -76,7 +76,8 @@ fn shell(app: &adw::Application, slot: &RefCell<Option<Rc<Shell>>>) -> Rc<Shell>
     shell
 }
 
-fn main() -> glib::ExitCode {
+/// Run the GTK app until its last window closes.
+pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)

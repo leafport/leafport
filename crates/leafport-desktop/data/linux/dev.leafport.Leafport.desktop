@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Leafport
-Exec=leafport-gtk %F
+Exec=leafport-desktop %F
 Type=Application
 Categories=Office;Viewer;
 MimeType=application/vnd.adobe.adept+xml;

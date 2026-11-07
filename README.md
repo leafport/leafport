@@ -13,28 +13,26 @@ Leafport keeps the ebooks you buy or borrow through Adobe-protected stores and l
 
 ## Front ends
 
-| Platform | App | Toolkit |
-| --- | --- | --- |
-| Linux | `leafport-gtk` | GTK 4 and libadwaita, follows the system style |
-| macOS, Windows | `leafport-desktop` | egui |
+The desktop app, `leafport-desktop`, uses a toolkit suited to each platform:
 
-Both share the application logic in `leafport-app` and the protocol and library code in `leafport-core`. `leafport-cli` is a small command-line harness for the core.
+| Platform | Toolkit |
+| --- | --- |
+| Linux | GTK 4 and libadwaita, follows the system style |
+| macOS, Windows | egui |
+
+Both front ends share the application logic in `leafport-app` and the protocol and library code in `leafport-core`. `leafport-cli` is a small command-line harness for the core.
 
 ## Building
 
 Leafport needs a current stable Rust toolchain.
 
 ```sh
-# Linux
-cargo run -p leafport-gtk
-# Import an ACSM file on launch; a second launch hands it to the running window
-cargo run -p leafport-gtk -- /path/to/file.acsm
-
-# macOS and Windows
 cargo run -p leafport-desktop
+# Import an ACSM file on launch; on Linux, a second launch hands it to the running window
+cargo run -p leafport-desktop -- /path/to/file.acsm
 ```
 
-The GTK app needs a C toolchain and the GTK 4.10 and libadwaita 1.5 development packages: `gtk4` and `libadwaita` on Arch, `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu. On Linux, `leafport-desktop` prints a pointer to `leafport-gtk` and exits.
+On Linux, the app needs a C toolchain and the GTK 4.10 and libadwaita 1.5 development packages: `gtk4` and `libadwaita` on Arch, `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu.
 
 The CLI inspects the service and ACSM files:
 

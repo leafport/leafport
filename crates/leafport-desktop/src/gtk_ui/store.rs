@@ -9,7 +9,7 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use leafport_app::{Activity, Row};
 
-use crate::covers::Covers;
+use crate::gtk_ui::covers::Covers;
 
 mod imp {
     use std::cell::{Cell, RefCell};

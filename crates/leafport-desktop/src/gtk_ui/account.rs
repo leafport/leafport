@@ -8,7 +8,7 @@ use gtk::glib;
 use leafport_app::{Provider, Status};
 use leafport_core::vendors::VendorCatalog;
 
-use crate::window::Window;
+use crate::gtk_ui::window::Window;
 
 /// UI-free sign-in state, ported from leafport-desktop's account.rs.
 pub struct Account {
