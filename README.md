@@ -1,35 +1,61 @@
 # Leafport
 
-Leafport syncs and reads the ebooks you buy or borrow through Adobe-protected stores and libraries, on Linux, macOS, and Windows. It covers Adobe ID sign-in, ACSM fulfillment, cloud sync, a local library, and a reader.
+Leafport keeps the ebooks you buy or borrow through Adobe-protected stores and libraries in sync on Linux, macOS, and Windows. Adobe makes no client for Linux, and without one a book bought there can't be opened at all. Leafport signs in to your account, downloads every book in your cloud library to a books folder, and keeps that folder up to date. Each book is saved as a plain EPUB or PDF file that any reader opens.
 
-This is early implementation. The core loads the sign-in providers, including distinct vendor IDs and the built-in Adobe ID choice. Activation, fulfillment, and cloud sync are in development. A desktop shell provides EPUB text reading and live provider discovery.
+## Features
 
-The diagnostic harness loads the live vendor list, or reads a local response:
+- **Sign-in** with an Adobe ID or one of the providers the service offers (libraries, stores). The activation is kept in the operating system's credential store: Secret Service on Linux, Keychain on macOS, and Credential Manager on Windows.
+- **Cloud sync.** Leafport lists the books in your account and syncs one or all of them. It shows progress and can cancel queued or running syncs. Books already in the folder are skipped.
+- **ACSM import.** Open an `.acsm` file from a store or library, through the menu or as a launch argument. Leafport fulfills it and adds it to the account's cloud library, so other devices see it too.
+- **Loans.** A loaned book can be returned early from its row menu.
+- **Exclusions.** A book can be excluded from Sync All. Leafport never deletes book folders.
+- **Books folder.** Each title gets its own folder, `<Title> [<id>]/`, holding the book, its ACSM, and a `metadata.yaml`. The folder can be changed in the settings.
+
+## Front ends
+
+| Platform | App | Toolkit |
+| --- | --- | --- |
+| Linux | `leafport-gtk` | GTK 4 and libadwaita, follows the system style |
+| macOS, Windows | `leafport-desktop` | egui |
+
+Both share the application logic in `leafport-app` and the protocol and library code in `leafport-core`. `leafport-cli` is a small command-line harness for the core.
+
+## Building
+
+Leafport needs a current stable Rust toolchain.
+
+```sh
+# Linux
+cargo run -p leafport-gtk
+# Import an ACSM file on launch; a second launch hands it to the running window
+cargo run -p leafport-gtk -- /path/to/file.acsm
+
+# macOS and Windows
+cargo run -p leafport-desktop
+```
+
+The GTK app needs a C toolchain and the GTK 4.10 and libadwaita 1.5 development packages: `gtk4` and `libadwaita` on Arch, `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu. On Linux, `leafport-desktop` prints a pointer to `leafport-gtk` and exits.
+
+The CLI inspects the service and ACSM files:
 
 ```sh
 cargo run -p leafport-cli -- vendors
-cargo run -p leafport-cli -- vendors crates/leafport-core/tests/data/authentication-service-info.xml
+cargo run -p leafport-cli -- service-info
+cargo run -p leafport-cli -- acsm-info /path/to/file.acsm
 ```
 
-The live command successfully loaded 42 choices on 2026-10-17, including Adobe ID, CloudLibrary, OverDrive, Google, and PocketBook. This verifies discovery only, not vendor login, fulfillment, or sync. The fixture is synthetic.
+## Where things live
 
-## Native desktop
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Books folder (default) | `~/.local/share/leafport/Books` | `~/Library/Application Support/leafport/Books` | `%APPDATA%\leafport\Books` |
+| Settings | `~/.config/leafport/settings.yaml` | `~/Library/Application Support/leafport/settings.yaml` | `%APPDATA%\leafport\settings.yaml` |
 
-```sh
-# Linux (GTK 4 and libadwaita)
-cargo run -p leafport-gtk
-# Optional: import an ACSM file on launch
-cargo run -p leafport-gtk -- /path/to/file.acsm
-```
-
-On Linux the app is `leafport-gtk`, a GTK4 and libadwaita front end. Building it needs a C toolchain and the GTK 4.10 and libadwaita 1.5 development packages (`gtk4` and `libadwaita` on Arch, `libgtk-4-dev` and `libadwaita-1-dev` on Debian and Ubuntu).
-
-`leafport-desktop` is the egui front end. It builds on macOS and Windows only, and is their UI until native apps exist. On Linux it prints a pointer to `leafport-gtk` and exits. The macOS and Windows builds have not been built or run.
-
-Both front ends show the library list from your account, with a cover, sync status and a button per book. They sign in and out, sync one book or all of them, cancel a queued or running sync or import, return a loan, and exclude a book from Sync All. An exclusion is stored as `excluded: true` in the book's `metadata.yaml`; excluding a book that was never synced writes its folder with the ACSM and metadata only. Leafport never deletes book folders. They import an ACSM file through the menu (Ctrl+O on Linux) or from the launch argument; on Linux, a second launch with an ACSM file hands it to the running window. The settings set the books folder; the egui app also sets the theme, while the GTK app follows the system style.
+Signing in activates this computer as one of your account's devices. The account's device limit applies, so signing out and in again uses another slot.
 
 ## Roadmap
 
-- **Releases:** packages for Linux, macOS and Windows, each built and run on its platform before a release.
-- **macOS and Windows builds:** the egui app has not been built or run on either platform yet.
-- **Live verification:** verify fulfillment with more stores and libraries.
+- **Distribution:** a Flatpak for Linux, signed app bundles for macOS and Windows, and CI-built releases. macOS and Windows check for updates; the Flatpak gets them from its repository.
+- **macOS and Windows builds:** `leafport-desktop` has only been type-checked on Linux so far. Build and test it on both platforms.
+- **Live verification:** verify fulfillment with more stores and libraries, including Google Play Books.
+- **Several accounts:** the activation is a single record today.
