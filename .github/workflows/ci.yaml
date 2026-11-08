@@ -34,7 +34,7 @@ jobs:
           cache: false
       - run: cargo fmt --all --check
 
-  # Each platform compiles its own front end: GTK on Linux, egui on macOS and Windows.
+  # Each platform compiles its own frontend: GTK on Linux, egui on macOS and Windows.
   check:
     strategy:
       fail-fast: false

@@ -26,7 +26,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - name: Check the version
+      - name: Check the Version
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -95,7 +95,7 @@ jobs:
           mkdir -p dist-out
           cargo deb -p leafport-desktop --no-build --target ${{ matrix.target }} -o "$GITHUB_WORKSPACE/dist-out/"
 
-      - name: Package the .dmg and the Windows installer
+      - name: Package the .dmg and the Windows Installer
         if: runner.os != 'Linux'
         run: |
           cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
@@ -122,7 +122,7 @@ jobs:
         with:
           path: dist-out
           merge-multiple: true
-      - name: Draft the release
+      - name: Draft the Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}

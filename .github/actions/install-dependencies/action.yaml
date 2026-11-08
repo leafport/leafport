@@ -1,4 +1,4 @@
-name: Install dependencies
+name: Install Dependencies
 description: >-
   Installs what building and testing Leafport needs beyond the Rust toolchain: GTK 4 and
   libadwaita on Linux, and on every platform the pdfium build for the runner's OS and architecture,
@@ -13,7 +13,7 @@ runs:
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
 
-    - name: Download pdfium
+    - name: Download PDFium
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}

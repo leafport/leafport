@@ -1,8 +1,8 @@
 # Distribution
 
-| Package | Built by | Where |
+| Package | Built By | Where |
 | --- | --- | --- |
-| Arch Linux (AUR) | `aur/PKGBUILD`, from the release's source tarball | the `leafport` AUR package |
+| Arch Linux (AUR) | `aur/PKGBUILD`, from the release's git tag | the `leafport` AUR package |
 | Debian and Ubuntu `.deb` | `cargo deb`, configured in `crates/leafport-desktop/Cargo.toml` | GitHub release |
 | macOS `.dmg` (Apple silicon, Intel) | `cargo packager`, same file | GitHub release |
 | Windows installer (`-setup.exe`) | `cargo packager`, same file | GitHub release |

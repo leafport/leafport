@@ -251,7 +251,7 @@ impl ServiceClient {
 
     pub fn new() -> Result<Self, ServiceError> {
         let http = reqwest::blocking::Client::builder()
-            // Kobo's Cloudflare front end refuses requests without a User-Agent with 403.
+            // Kobo's Cloudflare frontend refuses requests without a User-Agent with 403.
             .user_agent(format!("Leafport/{}", crate::VERSION))
             .connect_timeout(Duration::from_secs(15))
             // The blocking client applies this to the wait for the response headers and
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn requests_carry_the_user_agent() {
-        // Kobo's Cloudflare front end answers requests without a User-Agent with 403.
+        // Kobo's Cloudflare frontend answers requests without a User-Agent with 403.
         for head in [
             request_head(|client, url| {
                 client.fetch(url, 1024).unwrap();
