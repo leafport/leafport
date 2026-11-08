@@ -1,0 +1,37 @@
+name: Install Dependencies
+description: >-
+  Installs what building and testing Leafport needs beyond the Rust toolchain: GTK 4 and
+  libadwaita on Linux, and on every platform the pdfium build for the runner's OS and architecture,
+  unpacked to target/pdfium. LEAFPORT_PDFIUM_LIB points the tests at it, and the packagers bundle it
+  from there.
+
+runs:
+  using: composite
+  steps:
+    - name: Install GTK and libadwaita
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+    - name: Download PDFium
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        # The pdfium build the pdfium-render bindings target (its pdfium_latest feature).
+        PDFIUM_RELEASE: chromium/8125
+      run: |
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)     platform=linux-x64;   lib=lib/libpdfium.so ;;
+          Linux-ARM64)   platform=linux-arm64; lib=lib/libpdfium.so ;;
+          macOS-ARM64)   platform=mac-arm64;   lib=lib/libpdfium.dylib ;;
+          macOS-X64)     platform=mac-x64;     lib=lib/libpdfium.dylib ;;
+          Windows-X64)   platform=win-x64;     lib=bin/pdfium.dll ;;
+          Windows-ARM64) platform=win-arm64;   lib=bin/pdfium.dll ;;
+          *) echo "No pdfium build for $RUNNER_OS on $RUNNER_ARCH" >&2; exit 1 ;;
+        esac
+        # Relative paths: GNU tar on Windows reads the colon in D:\... as a remote host.
+        mkdir -p target/pdfium
+        gh release download "$PDFIUM_RELEASE" -R bblanchon/pdfium-binaries \
+          -p "pdfium-$platform.tgz" -O target/pdfium.tgz --clobber
+        tar xzf target/pdfium.tgz -C target/pdfium
+        echo "LEAFPORT_PDFIUM_LIB=$GITHUB_WORKSPACE/target/pdfium/$lib" >> "$GITHUB_ENV"

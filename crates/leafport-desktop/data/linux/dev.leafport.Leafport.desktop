@@ -1,5 +1,6 @@
 [Desktop Entry]
 Name=Leafport
+Comment=Keep your ebooks in sync
 Exec=leafport-desktop %F
 Type=Application
 Categories=Office;Viewer;

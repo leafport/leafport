@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.leafport.Leafport</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Leafport</name>
+  <summary>Keep your ebooks in sync</summary>
+  <developer id="dev.leafport">
+    <name>The Leafport contributors</name>
+  </developer>
+  <description>
+    <p>
+      Leafport keeps the ebooks you buy or borrow through Adobe-protected stores and
+      libraries in sync. It signs in to your account, downloads every book in your cloud
+      library to a books folder, and keeps that folder up to date. Each book is saved as a
+      plain EPUB or PDF file that any reader opens.
+    </p>
+    <ul>
+      <li>Sign in with an Adobe ID or one of the libraries and stores the service offers</li>
+      <li>Sync one book or the whole cloud library</li>
+      <li>Open ACSM files from a store or library</li>
+      <li>Return loaned books early</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.leafport.Leafport.desktop</launchable>
+  <url type="homepage">https://github.com/leafport/leafport</url>
+  <url type="bugtracker">https://github.com/leafport/leafport/issues</url>
+  <url type="vcs-browser">https://github.com/leafport/leafport</url>
+  <provides>
+    <binary>leafport-desktop</binary>
+    <mediatype>application/vnd.adobe.adept+xml</mediatype>
+  </provides>
+  <requires>
+    <internet>always</internet>
+  </requires>
+  <content_rating type="oars-1.1"/>
+</component>

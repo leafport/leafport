@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use leafport_core::library::{LibraryError, Loan, Metadata, Settings, Source, Theme, paths};
+use leafport_core::library::{LibraryError, Loan, Metadata, Settings, Source, Theme};
 
 struct TempDir(PathBuf);
 
@@ -109,6 +109,8 @@ fn settings_default_when_missing_and_round_trip() {
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn linux_dirs_follow_xdg_with_home_fallback() {
+    use leafport_core::library::paths;
+
     let env = |k: &str| match k {
         "XDG_DATA_HOME" => Some("/x/data".into()),
         "HOME" => Some("/home/u".into()),

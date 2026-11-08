@@ -2,6 +2,9 @@
 name = "leafport-desktop"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Keep your ebooks in sync"
 
 [dependencies]
 leafport-app = { path = "../leafport-app" }
@@ -30,4 +33,52 @@ eframe = {
         "glow",
     ],
 }
-rfd = "0.17.2"
+rfd = "0.18.0"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"
+
+# Debian package, built with cargo-deb. The release workflow downloads the pdfium
+# library into target/pdfium before packaging.
+[package.metadata.deb]
+name = "leafport"
+maintainer = "The Leafport contributors"
+copyright = "2026 The Leafport contributors"
+section = "net"
+depends = "$auto"
+extended-description = """\
+Leafport keeps the ebooks you buy or borrow through Adobe-protected stores and \
+libraries in sync. It downloads every book in your cloud library to a books folder \
+as a plain EPUB or PDF file."""
+assets = [
+    ["target/release/leafport-desktop", "usr/bin/", "755"],
+    ["data/linux/dev.leafport.Leafport.desktop", "usr/share/applications/", "644"],
+    ["data/linux/dev.leafport.Leafport.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["data/icons/dev.leafport.Leafport.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../target/pdfium/lib/libpdfium.so", "usr/lib/leafport/", "644"],
+]
+
+# macOS app bundle and DMG, and the Windows NSIS installer, built with cargo-packager.
+# The release workflow downloads the pdfium library into target/pdfium before packaging.
+[package.metadata.packager]
+productName = "Leafport"
+identifier = "dev.leafport.Leafport"
+publisher = "The Leafport contributors"
+copyright = "Copyright © 2026 The Leafport contributors"
+category = "Productivity"
+icons = ["data/icons/*.png"]
+# Matches only in the Windows pdfium archive; installed next to the executable.
+resources = ["../../target/pdfium/bin/*.dll"]
+
+[[package.metadata.packager.fileAssociations]]
+extensions = ["acsm"]
+mimeType = "application/vnd.adobe.adept+xml"
+description = "Adobe Content Server Message"
+role = "viewer"
+
+[package.metadata.packager.macos]
+minimumSystemVersion = "11.0"
+frameworks = ["../../target/pdfium/lib/libpdfium.dylib"]
+
+[package.metadata.packager.nsis]
+installerIcon = "data/icons/leafport.ico"

@@ -16,9 +16,7 @@ use crate::fulfillment::{
 use crate::service::Transport;
 use crate::store::ActivationState;
 
-use crate::activation::{
-    CLIENT_LOCALE, CLIENT_VERSION, DEVICE_TYPE, PRODUCT_NAME, SOFTWARE_VERSION,
-};
+use crate::activation::{CLIENT_LOCALE, DEVICE_TYPE, PRODUCT_NAME};
 
 /// Result of syncing one title into the books folder.
 #[derive(Clone, Debug)]
@@ -34,10 +32,10 @@ pub fn target_descriptor(activation: &ActivationState) -> DeviceDescriptor {
     // activation.device is the server-issued UUID, not the provisional local ID.
     DeviceDescriptor {
         role: DeviceRole::Target,
-        software_version: Some(SOFTWARE_VERSION.into()),
+        software_version: Some(crate::VERSION.into()),
         client_os: Some(std::env::consts::OS.to_string()),
         client_locale: Some(CLIENT_LOCALE.into()),
-        client_version: Some(CLIENT_VERSION.into()),
+        client_version: Some(crate::VERSION.into()),
         device_type: DEVICE_TYPE.into(),
         product_name: Some(PRODUCT_NAME.into()),
         device_name: None,

@@ -1,0 +1,131 @@
+name: Release
+
+# Run from the Actions tab on a commit whose Cargo.toml holds a release version, one without the
+# -dev suffix (dist/version.sh release). Once the CI checks pass, it builds every installer and
+# drafts a release with them for that commit. Publishing the draft creates the v<version> tag.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_DEB_VERSION: 3.8.0
+  CARGO_PACKAGER_VERSION: 0.11.8
+  # Matches minimumSystemVersion in the packager config; C dependencies default to the SDK's.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [[ "$VERSION" == *-dev ]]; then
+            echo "$VERSION is a development version; run dist/version.sh release first" >&2
+            exit 1
+          fi
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+            || git ls-remote --exit-code --tags origin "v$VERSION" > /dev/null; then
+            echo "A release or tag v$VERSION already exists" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yaml
+
+  build:
+    needs: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            # The oldest supported Ubuntu, so the .deb runs on 24.04 and newer.
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-26
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-26-intel
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: windows-aarch64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Release builds start clean, without anything restored from a cache.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+          cache: false
+
+      # The packagers bundle the pdfium this installs from target/pdfium.
+      - uses: ./.github/actions/install-dependencies
+
+      - name: Build
+        run: cargo build --release --locked -p leafport-desktop --target ${{ matrix.target }}
+
+      - name: Package the .deb
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
+          mkdir -p dist-out
+          cargo deb -p leafport-desktop --no-build --target ${{ matrix.target }} -o "$GITHUB_WORKSPACE/dist-out/"
+
+      - name: Package the .dmg and the Windows Installer
+        if: runner.os != 'Linux'
+        run: |
+          cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+          format=${{ runner.os == 'macOS' && 'dmg' || 'nsis' }}
+          cargo packager -p leafport-desktop --release --target ${{ matrix.target }} \
+            -f "$format" -o "$GITHUB_WORKSPACE/dist-out"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: leafport-${{ matrix.name }}
+          path: |
+            dist-out/*.deb
+            dist-out/*.dmg
+            dist-out/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist-out
+          merge-multiple: true
+      - name: Draft the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --draft --generate-notes --title "Leafport $VERSION" dist-out/*

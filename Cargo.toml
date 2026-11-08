@@ -10,6 +10,8 @@ members = [
 [workspace.package]
 version = "0.1.0-dev"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/leafport/leafport"
 
 [workspace.dependencies]
 reqwest = {
@@ -22,4 +24,4 @@ reqwest = {
         "system-proxy",
     ],
 }
-roxmltree = "0.21.1"
+roxmltree = "0.21.2"

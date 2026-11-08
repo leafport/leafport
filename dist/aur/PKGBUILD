@@ -1,0 +1,55 @@
+# Maintainer: The Leafport contributors
+
+pkgname=leafport
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Keep your ebooks in sync'
+arch=('x86_64' 'aarch64')
+url='https://github.com/leafport/leafport'
+license=('MIT')
+depends=(
+  'cairo'
+  'glib2'
+  'glibc'
+  'gtk4'
+  'libadwaita'
+  'libgcc'
+  'org.freedesktop.secrets'
+  'pango'
+)
+makedepends=('cargo' 'git')
+optdepends=('libpdfium: cover images for PDF books')
+# makepkg's LTO flags turn aws-lc-sys's C objects into GCC bitcode that rust-lld can't link.
+options=('!lto')
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p leafport-desktop
+}
+
+check() {
+  cd "$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --release --workspace
+}
+
+package() {
+  cd "$pkgname"
+  local data=crates/leafport-desktop/data
+  install -Dm755 target/release/leafport-desktop -t "$pkgdir/usr/bin"
+  install -Dm644 "$data/linux/dev.leafport.Leafport.desktop" -t "$pkgdir/usr/share/applications"
+  install -Dm644 "$data/linux/dev.leafport.Leafport.metainfo.xml" -t "$pkgdir/usr/share/metainfo"
+  install -Dm644 "$data/icons/dev.leafport.Leafport.svg" -t "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

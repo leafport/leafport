@@ -154,10 +154,6 @@ impl Transport for ServiceClient {
     }
 }
 
-/// User-Agent sent with every request. Kobo's Cloudflare front end refuses requests
-/// without one with 403.
-const USER_AGENT: &str = concat!("Leafport/", env!("CARGO_PKG_VERSION"));
-
 /// Turn a 429 into `RateLimited`, naming the host the request ended at.
 fn reject_rate_limit(
     response: reqwest::blocking::Response,
@@ -255,7 +251,8 @@ impl ServiceClient {
 
     pub fn new() -> Result<Self, ServiceError> {
         let http = reqwest::blocking::Client::builder()
-            .user_agent(USER_AGENT)
+            // Kobo's Cloudflare frontend refuses requests without a User-Agent with 403.
+            .user_agent(format!("Leafport/{}", crate::VERSION))
             .connect_timeout(Duration::from_secs(15))
             // The blocking client applies this to the wait for the response headers and
             // to each body read, not to the whole body: a large book on a slow link
@@ -359,7 +356,7 @@ mod tests {
 
     #[test]
     fn requests_carry_the_user_agent() {
-        // Kobo's Cloudflare front end answers requests without a User-Agent with 403.
+        // Kobo's Cloudflare frontend answers requests without a User-Agent with 403.
         for head in [
             request_head(|client, url| {
                 client.fetch(url, 1024).unwrap();
@@ -369,10 +366,8 @@ mod tests {
             }),
         ] {
             assert!(
-                head.to_ascii_lowercase().contains(&format!(
-                    "\r\nuser-agent: leafport/{}\r\n",
-                    env!("CARGO_PKG_VERSION")
-                )),
+                head.to_ascii_lowercase()
+                    .contains(&format!("\r\nuser-agent: leafport/{}\r\n", crate::VERSION)),
                 "{head}"
             );
         }

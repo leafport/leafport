@@ -1,4 +1,4 @@
-//! The macOS and Windows front end: egui over `leafport-app`.
+//! The macOS and Windows frontend: egui over `leafport-app`.
 
 mod account;
 pub mod app;

@@ -1,0 +1,24 @@
+pkgbase = leafport
+	pkgdesc = Keep your ebooks in sync
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/leafport/leafport
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	makedepends = git
+	depends = cairo
+	depends = glib2
+	depends = glibc
+	depends = gtk4
+	depends = libadwaita
+	depends = libgcc
+	depends = org.freedesktop.secrets
+	depends = pango
+	optdepends = libpdfium: cover images for PDF books
+	options = !lto
+	source = leafport::git+https://github.com/leafport/leafport.git#tag=v0.1.0
+	sha256sums = SKIP
+
+pkgname = leafport

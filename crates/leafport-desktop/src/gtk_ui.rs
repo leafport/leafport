@@ -1,4 +1,4 @@
-//! The Linux front end: GTK 4 and libadwaita over `leafport-app`.
+//! The Linux frontend: GTK 4 and libadwaita over `leafport-app`.
 
 mod account;
 mod covers;

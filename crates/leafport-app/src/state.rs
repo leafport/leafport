@@ -1122,8 +1122,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A theme-only change keeps a books folder whose path is not valid UTF-8.
-    #[cfg(unix)]
+    /// A theme-only change keeps a books folder whose path is not valid UTF-8. Not on macOS:
+    /// APFS rejects file names that aren't UTF-8, so such a folder can't exist there.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn non_utf8_books_dir_survives_theme_change() {
         use std::os::unix::ffi::OsStrExt;
