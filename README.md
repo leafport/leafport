@@ -64,7 +64,9 @@ Signing in activates this computer as one of your account's devices. The account
 
 ## Roadmap
 
-- **Distribution:** a Flatpak for Linux, and signed builds for macOS and Windows. macOS and Windows check for updates; the Flatpak gets them from its repository.
+- **Distribution:** a Flatpak for Linux, and signed builds for macOS and Windows.
+- **Updates on macOS and Windows:** Leafport downloads a new release in the background and installs it once the user confirms, then relaunches. Each installer is signed by the release workflow, and Leafport refuses one whose signature doesn't match. On Linux, updates come from the package manager or the Flatpak repository.
+- **Native front ends on macOS and Windows:** replace egui with each platform's own toolkit, as GTK and libadwaita are on Linux.
 - **macOS and Windows builds:** `leafport-desktop` has only been type-checked on Linux so far. Build and test it on both platforms.
 - **Live verification:** verify fulfillment with more stores and libraries, including Google Play Books.
 - **Several accounts:** the activation is a single record today.
