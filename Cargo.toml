@@ -24,4 +24,4 @@ reqwest = {
         "system-proxy",
     ],
 }
-roxmltree = "0.21.1"
+roxmltree = "0.21.2"

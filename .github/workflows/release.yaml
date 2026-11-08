@@ -12,7 +12,7 @@ permissions:
 
 env:
   # The pdfium build the pdfium-render bindings target (its pdfium_latest feature).
-  PDFIUM_RELEASE: chromium/7881
+  PDFIUM_RELEASE: chromium/8125
   CARGO_DEB_VERSION: 3.8.0
   CARGO_PACKAGER_VERSION: 0.11.8
   # Matches minimumSystemVersion in the packager config; C dependencies default to the SDK's.
