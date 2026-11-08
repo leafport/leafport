@@ -519,10 +519,6 @@ pub const DEVICE_TYPE: &str = "standalone";
 /// Product name reported in the activate and fulfill requests.
 pub const PRODUCT_NAME: &str = "Leafport";
 
-/// Client and software versions reported in the activate and fulfill requests:
-/// Leafport's own version.
-pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CLIENT_LOCALE: &str = "en";
 
 /// Server-issued device activation, the response of /Activate (record
@@ -665,12 +661,12 @@ pub fn activate_request(
     field(&mut xml, "deviceType", DEVICE_TYPE);
     field(&mut xml, "clientOS", client_os);
     field(&mut xml, "clientLocale", CLIENT_LOCALE);
-    field(&mut xml, "clientVersion", CLIENT_VERSION);
+    field(&mut xml, "clientVersion", crate::VERSION);
     xml.push_str("<targetDevice>");
-    field(&mut xml, "softwareVersion", SOFTWARE_VERSION);
+    field(&mut xml, "softwareVersion", crate::VERSION);
     field(&mut xml, "clientOS", client_os);
     field(&mut xml, "clientLocale", CLIENT_LOCALE);
-    field(&mut xml, "clientVersion", CLIENT_VERSION);
+    field(&mut xml, "clientVersion", crate::VERSION);
     field(&mut xml, "deviceType", DEVICE_TYPE);
     field(&mut xml, "productName", PRODUCT_NAME);
     field(&mut xml, "fingerprint", fingerprint);
