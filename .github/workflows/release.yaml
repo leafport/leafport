@@ -1,0 +1,123 @@
+name: Release
+
+# A pushed v* tag builds every installer and drafts a GitHub release with them.
+# Run it by hand to build the installers as workflow artifacts without releasing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The pdfium build the pdfium-render bindings target (its pdfium_latest feature).
+  PDFIUM_RELEASE: chromium/7881
+  CARGO_DEB_VERSION: 3.8.0
+  CARGO_PACKAGER_VERSION: 0.11.8
+  # Matches minimumSystemVersion in the packager config; C dependencies default to the SDK's.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            # The oldest supported Ubuntu, so the .deb runs on 24.04 and newer.
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            pdfium: linux-x64
+          - name: macos-aarch64
+            os: macos-26
+            target: aarch64-apple-darwin
+            pdfium: mac-arm64
+          - name: macos-x86_64
+            os: macos-26-intel
+            target: x86_64-apple-darwin
+            pdfium: mac-x64
+          - name: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            pdfium: win-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          [ "v$version" = "$GITHUB_REF_NAME" ] || {
+            echo "Tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          }
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+
+      - name: Install GTK and libadwaita
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+
+      - name: Download pdfium
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p target/pdfium
+          gh release download "$PDFIUM_RELEASE" -R bblanchon/pdfium-binaries \
+            -p "pdfium-${{ matrix.pdfium }}.tgz" -O pdfium.tgz
+          tar xzf pdfium.tgz -C target/pdfium
+
+      - name: Build
+        run: cargo build --release --locked -p leafport-desktop --target ${{ matrix.target }}
+
+      - name: Package the .deb
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-deb --locked --version "$CARGO_DEB_VERSION"
+          mkdir -p dist-out
+          cargo deb -p leafport-desktop --no-build --target ${{ matrix.target }} -o "$GITHUB_WORKSPACE/dist-out/"
+
+      - name: Package the .dmg and the Windows installer
+        if: runner.os != 'Linux'
+        run: |
+          cargo install cargo-packager --locked --version "$CARGO_PACKAGER_VERSION"
+          format=${{ runner.os == 'macOS' && 'dmg' || 'nsis' }}
+          cargo packager -p leafport-desktop --release --target ${{ matrix.target }} \
+            -f "$format" -o "$GITHUB_WORKSPACE/dist-out"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: leafport-${{ matrix.name }}
+          path: |
+            dist-out/*.deb
+            dist-out/*.dmg
+            dist-out/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist-out
+          merge-multiple: true
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --generate-notes --title "Leafport ${GITHUB_REF_NAME#v}" \
+            dist-out/*

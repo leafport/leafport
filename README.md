@@ -22,6 +22,17 @@ The desktop app, `leafport-desktop`, uses a toolkit suited to each platform:
 
 Both front ends share the application logic in `leafport-app` and the protocol and library code in `leafport-core`. `leafport-cli` is a small command-line harness for the core.
 
+## Installing
+
+- **Arch Linux:** the [`leafport`](https://aur.archlinux.org/packages/leafport) AUR package. Install `libpdfium` too for PDF cover images.
+- **Debian 13, Ubuntu 24.04 and newer:** the `.deb` from the [releases](https://github.com/leafport/leafport/releases).
+- **macOS 11 and newer:** the `.dmg` from the releases, `aarch64` for Apple silicon and `x64` for Intel.
+- **Windows:** the `-setup.exe` installer from the releases.
+
+The macOS and Windows builds aren't signed yet. On macOS, allow the app under System Settings › Privacy & Security after the first launch attempt. On Windows, choose "More info", then "Run anyway" in the SmartScreen prompt.
+
+See [`dist/README.md`](dist/README.md) for how the packages are built and released.
+
 ## Building
 
 Leafport needs a current stable Rust toolchain.
@@ -53,7 +64,7 @@ Signing in activates this computer as one of your account's devices. The account
 
 ## Roadmap
 
-- **Distribution:** a Flatpak for Linux, signed app bundles for macOS and Windows, and CI-built releases. macOS and Windows check for updates; the Flatpak gets them from its repository.
+- **Distribution:** a Flatpak for Linux, and signed builds for macOS and Windows. macOS and Windows check for updates; the Flatpak gets them from its repository.
 - **macOS and Windows builds:** `leafport-desktop` has only been type-checked on Linux so far. Build and test it on both platforms.
 - **Live verification:** verify fulfillment with more stores and libraries, including Google Play Books.
 - **Several accounts:** the activation is a single record today.
