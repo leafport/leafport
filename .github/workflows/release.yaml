@@ -76,14 +76,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Release builds start clean, without anything restored from a cache.
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      # Release builds start clean, without anything restored from a cache. The packagers bundle
+      # the pdfium this installs from target/pdfium.
+      - uses: ./.github/actions/install-dependencies
         with:
           target: ${{ matrix.target }}
           cache: false
-
-      # pdfium for the runner, which the packagers bundle from target/pdfium.
-      - uses: ./.github/actions/install-dependencies
 
       - name: Build
         run: cargo build --release --locked -p leafport-desktop --target ${{ matrix.target }}

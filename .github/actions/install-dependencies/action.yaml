@@ -1,13 +1,33 @@
 name: Install dependencies
 description: >-
-  Installs what building and testing Leafport needs beyond the Rust toolchain: GTK 4 and
+  Installs what building and testing Leafport needs: the stable Rust toolchain, GTK 4 and
   libadwaita on Linux, and on every platform the pdfium build for the runner's OS and architecture,
   unpacked to target/pdfium. LEAFPORT_PDFIUM_LIB points the tests at it, and the packagers bundle it
   from there.
 
+inputs:
+  components:
+    description: Comma-separated rustup components to install, such as clippy
+    required: false
+    default: ""
+  target:
+    description: Rust target triple to install
+    required: false
+    default: ""
+  cache:
+    description: Whether to cache Cargo's registry and the target directory
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
+    - uses: actions-rust-lang/setup-rust-toolchain@v2
+      with:
+        components: ${{ inputs.components }}
+        target: ${{ inputs.target }}
+        cache: ${{ inputs.cache }}
+
     - name: Install GTK and libadwaita
       if: runner.os == 'Linux'
       shell: bash
