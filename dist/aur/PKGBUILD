@@ -17,35 +17,35 @@ depends=(
   'org.freedesktop.secrets'
   'pango'
 )
-makedepends=('cargo')
+makedepends=('cargo' 'git')
 optdepends=('libpdfium: cover images for PDF books')
 # makepkg's LTO flags turn aws-lc-sys's C objects into GCC bitcode that rust-lld can't link.
 options=('!lto')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+source=("$pkgname::git+$url.git#tag=v$pkgver")
 sha256sums=('SKIP')
 
 prepare() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc --print host-tuple)"
 }
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo build --frozen --release -p leafport-desktop
 }
 
 check() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   cargo test --frozen --release --workspace
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$pkgname"
   local data=crates/leafport-desktop/data
   install -Dm755 target/release/leafport-desktop -t "$pkgdir/usr/bin"
   install -Dm644 "$data/linux/dev.leafport.Leafport.desktop" -t "$pkgdir/usr/share/applications"

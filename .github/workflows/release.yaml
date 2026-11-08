@@ -1,7 +1,7 @@
 name: Release
 
 # Run from the Actions tab on a commit whose Cargo.toml holds a release version, one without the
-# -dev suffix. Once the CI checks pass, it builds every installer and
+# -dev suffix (dist/version.sh release). Once the CI checks pass, it builds every installer and
 # drafts a release with them for that commit. Publishing the draft creates the v<version> tag.
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
         run: |
           VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           if [[ "$VERSION" == *-dev ]]; then
-            echo "$VERSION is a development version, not a release" >&2
+            echo "$VERSION is a development version; run dist/version.sh release first" >&2
             exit 1
           fi
           if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
