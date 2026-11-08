@@ -28,10 +28,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install the Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
-          rustup default stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: rustfmt
+          cache: false
       - run: cargo fmt --all --check
 
   # Each platform compiles its own front end: GTK on Linux, egui on macOS and Windows.
@@ -44,16 +44,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy
-          rustup default stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: clippy
 
-      - name: Install GTK and libadwaita
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/install-dependencies
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

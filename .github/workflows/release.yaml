@@ -10,8 +10,6 @@ permissions:
   contents: read
 
 env:
-  # The pdfium build the pdfium-render bindings target (its pdfium_latest feature).
-  PDFIUM_RELEASE: chromium/8125
   CARGO_DEB_VERSION: 3.8.0
   CARGO_PACKAGER_VERSION: 0.11.8
   # Matches minimumSystemVersion in the packager config; C dependencies default to the SDK's.
@@ -59,40 +57,27 @@ jobs:
             # The oldest supported Ubuntu, so the .deb runs on 24.04 and newer.
             os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            pdfium: linux-x64
           - name: macos-aarch64
             os: macos-26
             target: aarch64-apple-darwin
-            pdfium: mac-arm64
           - name: macos-x86_64
             os: macos-26-intel
             target: x86_64-apple-darwin
-            pdfium: mac-x64
           - name: windows-x86_64
             os: windows-2025
             target: x86_64-pc-windows-msvc
-            pdfium: win-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
-          rustup default stable
+      # Release builds start clean, without anything restored from a cache.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+          cache: false
 
-      - name: Install GTK and libadwaita
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
-
-      - name: Download pdfium
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p target/pdfium
-          gh release download "$PDFIUM_RELEASE" -R bblanchon/pdfium-binaries \
-            -p "pdfium-${{ matrix.pdfium }}.tgz" -O pdfium.tgz
-          tar xzf pdfium.tgz -C target/pdfium
+      # pdfium for the runner, which the packagers bundle from target/pdfium.
+      - uses: ./.github/actions/install-dependencies
 
       - name: Build
         run: cargo build --release --locked -p leafport-desktop --target ${{ matrix.target }}
