@@ -4,12 +4,16 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The Release workflow runs these checks before it builds anything.
+  workflow_call:
 
 permissions:
   contents: read
 
+# github.workflow is the caller's name when called, so a release's checks never cancel, or get
+# cancelled by, a regular CI run on the same ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:

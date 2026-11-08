@@ -1,7 +1,7 @@
 name: Release
 
-# A pushed v* tag builds every installer and drafts a GitHub release with them.
-# Run it by hand to build the installers as workflow artifacts without releasing.
+# A pushed v* tag builds every installer and drafts a GitHub release with them, once the CI
+# checks pass. Run it by hand to build the installers as workflow artifacts without releasing.
 on:
   push:
     tags: ["v*"]
@@ -23,7 +23,11 @@ defaults:
     shell: bash
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
   build:
+    needs: ci
     strategy:
       fail-fast: false
       matrix:
