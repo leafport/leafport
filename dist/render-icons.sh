@@ -6,9 +6,11 @@ set -eu
 dir="$(dirname "$0")/../crates/leafport-desktop/data/icons"
 svg="$dir/dev.leafport.Leafport.svg"
 
-for size in 32 128 256 512 1024; do
+for size in 32 128 256 512; do
     rsvg-convert -w "$size" -h "$size" "$svg" -o "$dir/$size.png"
 done
+# The macOS .icns takes 1024 pixels only as 512@2x, which cargo-packager reads from the file name.
+rsvg-convert -w 1024 -h 1024 "$svg" -o "$dir/512@2x.png"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
