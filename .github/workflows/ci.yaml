@@ -56,9 +56,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: ./.github/actions/install-dependencies
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: clippy
+
+      - uses: ./.github/actions/install-dependencies
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
