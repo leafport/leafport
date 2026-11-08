@@ -25,9 +25,9 @@ Both front ends share the application logic in `leafport-app` and the protocol a
 ## Installing
 
 - **Arch Linux:** the [`leafport`](https://aur.archlinux.org/packages/leafport) AUR package. Install `libpdfium` too for PDF cover images.
-- **Debian 13, Ubuntu 24.04 and newer:** the `.deb` from the [releases](https://github.com/leafport/leafport/releases).
+- **Debian 13, Ubuntu 24.04 and newer:** the `.deb` from the [releases](https://github.com/leafport/leafport/releases), `amd64` or `arm64`.
 - **macOS 11 and newer:** the `.dmg` from the releases, `aarch64` for Apple silicon and `x64` for Intel.
-- **Windows:** the `-setup.exe` installer from the releases.
+- **Windows:** the `-setup.exe` installer from the releases, `x64` or `arm64`.
 
 The macOS and Windows builds aren't signed yet. On macOS, allow the app under System Settings › Privacy & Security after the first launch attempt. On Windows, choose "More info", then "Run anyway" in the SmartScreen prompt.
 

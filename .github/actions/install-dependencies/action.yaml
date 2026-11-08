@@ -21,10 +21,12 @@ runs:
         PDFIUM_RELEASE: chromium/8125
       run: |
         case "$RUNNER_OS-$RUNNER_ARCH" in
-          Linux-X64)   platform=linux-x64; lib=lib/libpdfium.so ;;
-          macOS-ARM64) platform=mac-arm64; lib=lib/libpdfium.dylib ;;
-          macOS-X64)   platform=mac-x64;   lib=lib/libpdfium.dylib ;;
-          Windows-X64) platform=win-x64;   lib=bin/pdfium.dll ;;
+          Linux-X64)     platform=linux-x64;   lib=lib/libpdfium.so ;;
+          Linux-ARM64)   platform=linux-arm64; lib=lib/libpdfium.so ;;
+          macOS-ARM64)   platform=mac-arm64;   lib=lib/libpdfium.dylib ;;
+          macOS-X64)     platform=mac-x64;     lib=lib/libpdfium.dylib ;;
+          Windows-X64)   platform=win-x64;     lib=bin/pdfium.dll ;;
+          Windows-ARM64) platform=win-arm64;   lib=bin/pdfium.dll ;;
           *) echo "No pdfium build for $RUNNER_OS on $RUNNER_ARCH" >&2; exit 1 ;;
         esac
         # Relative paths: GNU tar on Windows reads the colon in D:\... as a remote host.
