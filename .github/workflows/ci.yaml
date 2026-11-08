@@ -34,24 +34,12 @@ jobs:
           cache: false
       - run: cargo fmt --all --check
 
-  # Each platform compiles its own front end: GTK on Linux, egui on macOS and Windows. The tests
-  # run once per OS; nothing in the code depends on the CPU architecture, so the ARM runners only
-  # build and link them, which catches the C dependencies failing there.
+  # Each platform compiles its own front end: GTK on Linux, egui on macOS and Windows.
   check:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            run-tests: true
-          - os: ubuntu-24.04-arm
-            run-tests: false
-          - os: macos-26
-            run-tests: true
-          - os: windows-2025
-            run-tests: true
-          - os: windows-11-arm
-            run-tests: false
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -66,9 +54,4 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        if: matrix.run-tests
         run: cargo test --workspace --locked
-
-      - name: Build the tests
-        if: ${{ !matrix.run-tests }}
-        run: cargo test --workspace --locked --no-run
