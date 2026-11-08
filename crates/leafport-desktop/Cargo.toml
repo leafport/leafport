@@ -2,6 +2,9 @@
 name = "leafport-desktop"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Keep your ebooks in sync"
 
 [dependencies]
 leafport-app = { path = "../leafport-app" }
@@ -31,3 +34,6 @@ eframe = {
     ],
 }
 rfd = "0.17.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"

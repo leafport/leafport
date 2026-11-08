@@ -374,12 +374,15 @@ fn forget_cover(covers: &mut crate::egui_ui::list::Covers, row: &Row) {
 }
 
 pub fn run() -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../data/icons/256.png"))
+        .expect("the bundled app icon is a valid PNG");
     eframe::run_native(
         "Leafport",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1120.0, 780.0])
-                .with_min_inner_size([720.0, 480.0]),
+                .with_min_inner_size([720.0, 480.0])
+                .with_icon(icon),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
