@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
@@ -512,8 +512,8 @@ fn pdfium() -> Option<&'static Pdfium> {
     PDFIUM.get_or_init(load_pdfium).as_ref()
 }
 
-/// Locate a pdfium shared library: an explicit LEAFPORT_PDFIUM_LIB path, a file next to the
-/// executable, or the system library. Returns a bound Pdfium.
+/// Locate a pdfium shared library: an explicit LEAFPORT_PDFIUM_LIB path, a copy bundled
+/// with the executable, or the system library. Returns a bound Pdfium.
 fn load_pdfium() -> Option<Pdfium> {
     // 1. Explicit override.
     if let Some(path) = std::env::var_os("LEAFPORT_PDFIUM_LIB")
@@ -521,13 +521,15 @@ fn load_pdfium() -> Option<Pdfium> {
     {
         return Some(Pdfium::new(bindings));
     }
-    // 2. A libpdfium next to the executable (how a packaged build would ship it).
+    // 2. A libpdfium shipped with the app.
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let name = Pdfium::pdfium_platform_library_name_at_path(dir);
-        if let Ok(bindings) = Pdfium::bind_to_library(&name) {
-            return Some(Pdfium::new(bindings));
+        for dir in bundled_library_dirs(dir) {
+            let name = Pdfium::pdfium_platform_library_name_at_path(&dir);
+            if let Ok(bindings) = Pdfium::bind_to_library(&name) {
+                return Some(Pdfium::new(bindings));
+            }
         }
     }
     // 3. The system library.
@@ -535,4 +537,17 @@ fn load_pdfium() -> Option<Pdfium> {
         return Some(Pdfium::new(bindings));
     }
     None
+}
+
+/// Where the installers put a bundled libpdfium, given the executable's directory: next to
+/// the executable (Windows, development builds), the app bundle's `Contents/Frameworks`
+/// (macOS), or the package's private `<prefix>/lib/leafport` (Linux and other Unix).
+fn bundled_library_dirs(exe_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![exe_dir.to_path_buf()];
+    if cfg!(target_os = "macos") {
+        dirs.push(exe_dir.join("../Frameworks"));
+    } else if cfg!(unix) {
+        dirs.push(exe_dir.join("../lib/leafport"));
+    }
+    dirs
 }
