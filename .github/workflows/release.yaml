@@ -1,10 +1,9 @@
 name: Release
 
-# A pushed v* tag builds every installer and drafts a GitHub release with them, once the CI
-# checks pass. Run it by hand to build the installers as workflow artifacts without releasing.
+# Run from the Actions tab on a commit whose Cargo.toml holds a release version, one without the
+# -dev suffix. Once the CI checks pass, it builds every installer and
+# drafts a release with them for that commit. Publishing the draft creates the v<version> tag.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -23,7 +22,31 @@ defaults:
     shell: bash
 
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [[ "$VERSION" == *-dev ]]; then
+            echo "$VERSION is a development version, not a release" >&2
+            exit 1
+          fi
+          if gh release view "v$VERSION" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+            || git ls-remote --exit-code --tags origin "v$VERSION" > /dev/null; then
+            echo "A release or tag v$VERSION already exists" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
   ci:
+    needs: version
     uses: ./.github/workflows/ci.yaml
 
   build:
@@ -52,15 +75,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Check the tag matches the version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          [ "v$version" = "$GITHUB_REF_NAME" ] || {
-            echo "Tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
-            exit 1
-          }
 
       - name: Install the Rust toolchain
         run: |
@@ -108,8 +122,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -121,7 +134,7 @@ jobs:
       - name: Draft the release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
-            --draft --verify-tag --generate-notes --title "Leafport ${GITHUB_REF_NAME#v}" \
-            dist-out/*
+          gh release create "v$VERSION" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --draft --generate-notes --title "Leafport $VERSION" dist-out/*
