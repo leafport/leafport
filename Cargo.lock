@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "leafport-app"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "base64",
  "leafport-core",
@@ -2362,14 +2362,14 @@ dependencies = [
 
 [[package]]
 name = "leafport-cli"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "leafport-core",
 ]
 
 [[package]]
 name = "leafport-core"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "aes",
  "base64",
@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "leafport-desktop"
-version = "0.1.0-dev"
+version = "0.1.0"
 dependencies = [
  "async-channel",
  "eframe",
